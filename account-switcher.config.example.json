@@ -9,7 +9,5 @@
   "requestTimeoutSeconds": 20,
   "quotaDeadlineSeconds": 45,
   "quotaMaxWorkers": 2,
-  "closeTimeoutSeconds": 15,
-  "oauthClientId": "",
-  "oauthClientSecret": ""
+  "closeTimeoutSeconds": 15
 }

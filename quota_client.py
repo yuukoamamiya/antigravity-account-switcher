@@ -20,6 +20,8 @@ import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from common import parse_time as _parse_time, safe_text as _safe_text
+
 
 PROJECT_ENDPOINTS = (
     "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
@@ -37,23 +39,6 @@ _CACHE_TTL_SECONDS = 6 * 60 * 60
 
 class QuotaError(RuntimeError):
     """Safe-to-display quota request failure."""
-
-
-def _safe_text(value: Any) -> str:
-    text = "" if value is None else str(value)
-    text = re.sub(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [已隐藏]", text)
-    text = re.sub(r"(?i)(access_token|refresh_token|id_token)\s*[=:]\s*[^\s,&]+", r"\1=[已隐藏]", text)
-    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", text)).strip()[:240]
-
-
-def _parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        result = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-        return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
-    except (TypeError, ValueError):
-        return None
 
 
 class QuotaClient:

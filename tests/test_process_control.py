@@ -60,8 +60,8 @@ class ProcessControlTests(unittest.TestCase):
                 return [ProcessInfo("Antigravity.exe", 1234)]
             return []
 
-        with patch("antigravity_account_switcher.find_processes", side_effect=query), patch(
-            "antigravity_account_switcher.terminate_process",
+        with patch("account_core.find_processes", side_effect=query), patch(
+            "account_core.terminate_process",
             return_value=SimpleNamespace(returncode=128),
         ):
             self.assertTrue(core.stop_antigravity())
