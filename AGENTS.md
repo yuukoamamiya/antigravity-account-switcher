@@ -1,5 +1,12 @@
 # Repository maintenance instructions
 
+## Shell and scripting
+
+- On Windows, use Git Bash for ordinary shell commands. When the execution tool supports shell selection, select `C:/Users/AmamiyaYuuko/scoop/apps/git/current/bin/bash.exe` explicitly.
+- Prefer Python for non-trivial text processing, structured-data transformations, and logic that would be fragile in shell syntax.
+- Use PowerShell only for Windows-specific tasks such as registry access, services, or Windows management cmdlets, or when Bash and Python are unsuitable. Do not pass Bash syntax to PowerShell.
+- With Git Bash, use POSIX-style paths for Bash-native commands and Windows paths only when the invoked Windows program requires them.
+
 ## Repository map
 
 - `README.md` is the user guide and release/build overview. Keep its Windows, portability, data-storage, and OAuth descriptions aligned with runtime behavior.
@@ -29,6 +36,6 @@
 
 ## Change ownership and security review
 
-- For code changes, assign each distinct change to its own `gpt-6-luna` subagent working directly on `main`; each subagent owns and commits its assigned change. Because these workers share the Git index, serialize all staging and commits. Do not stage or commit another worker's files.
+- Assign every persistent code or documentation change to its own `gpt-6-luna` subagent working directly on `main`; each subagent owns and commits its assigned change. Because these workers share the Git index, serialize all staging and commits. Do not stage or commit another worker's files.
 - After code modifications are complete, have the DeepSec subagent run its offline L1/L2 security snapshot scan on the changed code. Keep scan reports private and out of Git.
-- Documentation-only maintenance may be handled directly when specifically assigned. Keep commits narrowly scoped to the assigned files.
+- Keep each commit narrowly scoped to the files assigned to that subagent.
