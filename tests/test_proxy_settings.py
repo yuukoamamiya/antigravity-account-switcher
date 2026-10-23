@@ -41,24 +41,25 @@ class ProxySettingsTests(unittest.TestCase):
             self.assertEqual(result["futureOption"], {"enabled": True})
             self.assertNotIn("simulated-environment-secret", path.read_text(encoding="utf-8"))
 
-    def test_missing_private_config_migrates_legacy_file_without_losing_fields(self):
+    def test_missing_portable_config_updates_legacy_file_in_place_without_losing_fields(self):
         import config
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            private_path = root / "local-data" / "account-switcher.config.json"
+            private_path = root / "Data" / "settings" / "account-switcher.config.json"
             legacy_path = root / "account-switcher.config.json"
             legacy = {"oauthClientSecret": "simulated-legacy-secret", "credentialsDirectory": "legacy-creds",
                       "customPath": "preserve-me", "proxy": "http://old.example:8080"}
             legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
-            with patch.object(config, "CONFIG_PATH", private_path), patch.object(config, "LEGACY_CONFIG_PATH", legacy_path):
+            with patch.object(config, "CONFIG_PATH", private_path), patch.object(config, "LOCAL_CONFIG_PATH", root / "local-data" / "account-switcher.config.json"), patch.object(config, "LEGACY_CONFIG_PATH", legacy_path):
                 result = config.save_proxy_setting("8123")
-            saved = json.loads(private_path.read_text(encoding="utf-8"))
+            saved = json.loads(legacy_path.read_text(encoding="utf-8"))
             self.assertEqual(result, "http://127.0.0.1:8123")
             self.assertEqual(saved["proxy"], result)
             self.assertEqual(saved["oauthClientSecret"], "simulated-legacy-secret")
             self.assertEqual(saved["credentialsDirectory"], "legacy-creds")
             self.assertEqual(saved["customPath"], "preserve-me")
+            self.assertFalse(private_path.exists())
 
     def test_failed_write_does_not_change_runtime_config(self):
         runtime = {"proxy": "http://old.example:8080"}

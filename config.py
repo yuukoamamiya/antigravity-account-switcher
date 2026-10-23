@@ -10,19 +10,23 @@ from pathlib import Path
 from typing import Any
 
 from cache_store import atomic_save_json
+from portable_runtime import application_root, portable_paths
 
-ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "local-data" / "account-switcher.config.json"
+ROOT = application_root()
+PORTABLE_PATHS = portable_paths(ROOT)
+RESOURCE_ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = PORTABLE_PATHS["config"]
+LOCAL_CONFIG_PATH = ROOT / "local-data" / "account-switcher.config.json"
 LEGACY_CONFIG_PATH = ROOT / "account-switcher.config.json"
 OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "credentialsDirectory": "local-data/credentials",
+    "credentialsDirectory": "Data/credentials",
     "antigravityExecutable": "Antigravity.exe",
     "proxy": "",
     "noProxy": "localhost,127.0.0.1",
-    "logFile": "local-data/account-switcher.log",
-    "quotaCacheFile": "local-data/quota-cache.json",
+    "logFile": "Data/logs/account-switcher.log",
+    "quotaCacheFile": "Data/cache/quota-cache.json",
     "queryQuota": True,
     "requestTimeoutSeconds": 20,
     "quotaDeadlineSeconds": 45,
@@ -96,11 +100,12 @@ def save_proxy_setting(value: str, path: str | os.PathLike[str] | None = None) -
     the file. Existing file fields, including unknown fields, remain untouched.
     """
     proxy = normalize_proxy_setting(value)
-    config_path = Path(path) if path is not None else CONFIG_PATH
+    config_path = Path(path) if path is not None else active_config_path()
     try:
         source_path = config_path
-        if path is None and not config_path.exists() and LEGACY_CONFIG_PATH.exists():
-            source_path = LEGACY_CONFIG_PATH
+        if path is None and not config_path.exists():
+            source_path = next((candidate for candidate in config_candidates() if candidate.exists()), config_path)
+            config_path = source_path
         if source_path.exists():
             raw = json.loads(source_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
@@ -149,7 +154,7 @@ def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dic
 
 
 def load_config(path: str | os.PathLike[str] | None = None, *, environ: dict[str, str] | None = None) -> dict[str, Any]:
-    config_path = Path(path) if path is not None else (CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH)
+    config_path = Path(path) if path is not None else active_config_path()
     if not config_path.exists():
         return validate_config({}, environ=environ)
     try:
@@ -160,6 +165,15 @@ def load_config(path: str | os.PathLike[str] | None = None, *, environ: dict[str
         return validate_config(loaded, environ=environ)
     except ConfigError as exc:
         raise ConfigError(f"配置文件 {config_path} 无效：{exc}") from exc
+
+
+def config_candidates() -> tuple[Path, ...]:
+    """Return supported config locations in precedence order."""
+    return (CONFIG_PATH, LOCAL_CONFIG_PATH, LEGACY_CONFIG_PATH)
+
+
+def active_config_path() -> Path:
+    return next((candidate for candidate in config_candidates() if candidate.exists()), CONFIG_PATH)
 
 
 def resolve_path(value: str, *, root: Path = ROOT) -> Path:
