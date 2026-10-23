@@ -66,6 +66,6 @@ python packaging/build_portable.py
 
 该构建会在 `dist/` 生成便携 ZIP、源码 ZIP 和 SHA-256 清单；源码包名称为 `AntigravityAccountSwitcherPortable-0.1.0-source.zip`。普通源码运行仍支持 Python 3.10 或更新版本。
 
-本项目自有 Python 源码按 MIT License 发布，第三方运行时和依赖遵循各自许可证，详见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。`reference` 中曾包含外部 Antigravity Electron 应用的参考片段，不是本项目原创代码，也不是运行依赖；该目录不随公开源码或二进制发布。首次建立公开仓库时，应从经过筛选的源码 ZIP 初始化干净仓库，不要直接推送包含旧 reference 的本地开发 Git 历史。Git 历史不能由本项目文档清除。
+本项目原创 Python 源码按 MIT License 发布，第三方运行时和依赖遵循各自许可证，详见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。仓库开发历史包含不随发布包分发的外部 Electron 应用参考片段；其来源许可尚未核实。上游产品参考、原创代码的 MIT 许可边界及历史参考文件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 GitHub Actions 的 `portable-release` workflow 可在 Fork 的默认分支通过 `workflow_dispatch` 手动打包，生成 `AntigravityAccountSwitcherPortable-0.1.0-win10-x64-portable.zip` 和 `AntigravityAccountSwitcherPortable-0.1.0-source.zip`。`ci.yml` 仅在 main 分支推送和 Pull Request 时运行测试。维护者推送与 `VERSION` 一致的 `v0.1.0` 标签后，`portable-release` 会构建并创建草稿 Release，最终由维护者人工发布。项目不提供自动更新，也没有代码签名；请从项目 GitHub Releases 获取发布包并核对发布说明。
