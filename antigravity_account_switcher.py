@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 import tkinter as tk
 from tkinter import messagebox
+from cache_store import atomic_save_json, validate_cache
 from process_control import find_processes, terminate_process
 
 
@@ -332,7 +333,7 @@ class AccountCore:
         meta["payload_sha256"] = account.digest
         meta["payload_bytes"] = len(account.data)
         meta["refreshed_at"] = now_iso()
-        account.meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_save_json(account.meta_path, meta)
 
     @staticmethod
     def antigravity_running() -> bool:
@@ -1128,7 +1129,7 @@ class SwitcherApp:
     def save_cache(self) -> None:
         path = resolve_path(str(self.core.config["quotaCacheFile"]))
         try:
-            path.write_text(json.dumps(self.cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            atomic_save_json(path, self.cache)
         except Exception as exc:
             self.write_log(f"额度缓存保存失败：{safe_text(exc)}", "WARN")
 
@@ -1155,7 +1156,7 @@ def load_cache(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     try:
         value = read_json(path)
-        return value if isinstance(value, dict) else {}
+        return validate_cache(value)
     except Exception:
         return {}
 
