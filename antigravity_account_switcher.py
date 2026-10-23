@@ -34,6 +34,7 @@ from tkinter import messagebox
 from cache_store import atomic_save_json, validate_cache
 from process_control import find_processes, terminate_process
 from runtime_control import AccountOperationLocks, SingleInstance, WorkerLifecycle
+from quota_client import QuotaClient, run_quota_batch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -110,6 +111,8 @@ def load_config() -> dict[str, Any]:
         "quotaCacheFile": "local-data/quota-cache.json",
         "queryQuota": True,
         "requestTimeoutSeconds": 20,
+        "quotaDeadlineSeconds": 45,
+        "quotaMaxWorkers": 2,
         "closeTimeoutSeconds": 15,
         "oauthClientId": OAUTH_CLIENT_ID,
         "oauthClientSecret": os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET", ""),
@@ -248,6 +251,12 @@ class AccountCore:
         self.credentials = CredentialManager()
         self.operation_locks = AccountOperationLocks()
         self.credential_switch_lock = threading.Lock()
+        # Endpoint/project hints are routing-only and intentionally stay in
+        # memory; the persisted quota cache schema contains display data only.
+        self._quota_route_cache: dict[str, Any] = {}
+        self.quota_client = QuotaClient(
+            config, self.user_agent, self.save_account, self._quota_route_cache,
+        )
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.log_fn(safe_text(message), level)
@@ -388,10 +397,7 @@ class AccountCore:
                     raise RuntimeError("凭据写入后的校验失败。")
 
     def _opener(self) -> urllib.request.OpenerDirector:
-        proxy = str(self.config.get("proxy") or "").strip()
-        if proxy:
-            return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return self.quota_client._opener()
 
     def _json_request(self, url: str, access_token: str, body: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
@@ -483,89 +489,13 @@ class AccountCore:
 
     @staticmethod
     def _bucket(raw: dict[str, Any], group: dict[str, Any]) -> dict[str, Any] | None:
-        if raw.get("remainingFraction") is None:
-            return None
-        try:
-            fraction = float(raw["remainingFraction"])
-        except (TypeError, ValueError):
-            return None
-        if fraction > 1:
-            fraction /= 100
-        return {
-            "remainingFraction": max(0.0, min(1.0, fraction)),
-            "resetTime": str(raw.get("resetTime") or ""),
-            "displayName": str(raw.get("displayName") or ""),
-            "description": str(raw.get("description") or ""),
-            "window": str(raw.get("window") or ""),
-            "groupName": str(group.get("displayName") or ""),
-        }
+        return QuotaClient._bucket(raw, group)
 
     def quota(self, account: Account) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "id": account.account_id,
-            "success": False,
-            "fiveHour": None,
-            "weekly": None,
-            "error": None,
-            "attemptedAt": now_iso(),
-        }
-        try:
-            access_token = self._refresh_access_token(account)
-            body: dict[str, Any] = {}
-            project = self._project_id(access_token)
-            if project:
-                body["project"] = project
-            last_error = "额度接口未返回可识别数据。"
-            for endpoint in QUOTA_ENDPOINTS:
-                try:
-                    response = self._json_request(endpoint, access_token, body)
-                    groups = response.get("groups")
-                    if not isinstance(groups, list) or not groups:
-                        raise GoogleError("Google 返回的额度分组为空。")
-                    five_hour = None
-                    weekly = None
-                    for group in groups:
-                        if not isinstance(group, dict):
-                            continue
-                        for raw in group.get("buckets") or []:
-                            if not isinstance(raw, dict):
-                                continue
-                            bucket = self._bucket(raw, group)
-                            if bucket is None:
-                                continue
-                            # Google sometimes mentions the 5-hour limit in a
-                            # weekly bucket's description (for example when
-                            # the 5-hour limit has been exhausted).  Classify
-                            # from the explicit window/name fields first so
-                            # that description text cannot move a bucket into
-                            # the wrong UI column.
-                            primary_label = " ".join(
-                                str(bucket.get(key) or "")
-                                for key in ("window", "displayName")
-                            ).lower()
-                            if re.search(r"5\s*-?\s*h|5\s*hour|five.?hour|hourly", primary_label) and five_hour is None:
-                                five_hour = bucket
-                            elif re.search(r"week|weekly|7\s*-?\s*d|1\s*-?\s*w", primary_label) and weekly is None:
-                                weekly = bucket
-                            elif not primary_label:
-                                fallback_label = " ".join(
-                                    str(bucket.get(key) or "")
-                                    for key in ("description", "groupName")
-                                ).lower()
-                                if re.search(r"5\s*-?\s*h|5\s*hour|five.?hour|hourly", fallback_label) and five_hour is None:
-                                    five_hour = bucket
-                                elif re.search(r"week|weekly|7\s*-?\s*d|1\s*-?\s*w", fallback_label) and weekly is None:
-                                    weekly = bucket
-                    if five_hour is None and weekly is None:
-                        raise GoogleError("Google 返回了额度数据，但未识别出 5 小时或一周窗口。")
-                    result.update(success=True, fiveHour=five_hour, weekly=weekly, error=None)
-                    return result
-                except GoogleError as exc:
-                    last_error = str(exc)
-            raise GoogleError(last_error)
-        except Exception as exc:
-            result["error"] = safe_text(exc)
-            return result
+        # Keep refresh and quota reads serialized with switches for this
+        # account, while allowing unrelated accounts to run concurrently.
+        with self.operation_locks.hold(account.account_id):
+            return self.quota_client.quota(account)
 
 
 class SwitcherApp:
@@ -1088,11 +1018,16 @@ class SwitcherApp:
         self.write_log(f"开始查询 {len(self.accounts)} 个账号的额度。")
 
         def worker(cancel: threading.Event) -> None:
-            for account in list(self.accounts):
-                if cancel.is_set():
-                    break
-                self.events.put(("quota_result", self.core.quota(account)))
-            self.events.put(("quota_done", None))
+            try:
+                run_quota_batch(
+                    list(self.accounts),
+                    self.core.quota,
+                    cancel,
+                    lambda result: self.events.put(("quota_result", result)),
+                    self.core.config.get("quotaMaxWorkers", 2),
+                )
+            finally:
+                self.events.put(("quota_done", None))
 
         self.lifecycle.start("agy-quota", worker)
 
