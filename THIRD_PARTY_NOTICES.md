@@ -2,11 +2,10 @@
 
 本项目自有 Python 源码使用 MIT License，见 [LICENSE](LICENSE)。发布包还包含第三方运行组件；它们不属于本项目自有源码，并按各自许可证提供。
 
-构建发布包时，维护者应根据该次构建实际打包内容更新下列清单，并将对应许可证文本放入 `Other/`：
+每个发布包的 `Other/` 由构建流程从实际构建环境采集并包含自有 `LICENSE`，以及 Python、Tcl/Tk 和 PyInstaller 的真实许可证文本（`Python-LICENSE.txt`、`TclTk-LICENSE.txt`、`PyInstaller-COPYING.txt`）。PyInstaller 文件包含 bootloader exception。维护者需在每次发布前核对构建产物中的文本与实际打包组件一致：
 
-- Python 运行时及随附标准库组件：按 Python Software Foundation License 和各组件随附许可文件。
-- Tcl/Tk 运行时（若随构建分发）：按其发行包附带的许可证。
-- PyInstaller：按其许可证分发；PyInstaller bootloader 适用 bootloader exception。
-- 实际纳入包中的其他依赖或组件：按各自发行包中提供的许可证和通知。
+- Python 运行时及随附标准库组件按其发行包许可证提供；Tcl/Tk 按运行时附带许可证提供。
+- PyInstaller 按其许可证提供，bootloader exception 包含在 `PyInstaller-COPYING.txt` 中。
+- 如构建纳入其他第三方组件，也须将其对应许可证和通知放入 `Other/`。
 
-每个发布包的 `Other/` 应包含与该次构建对应的完整第三方许可文本。打包清单须以构建产物实际内容核实，不应将上述概括视为完整的发布依赖清单。
+上述文件以该次构建实际打包内容为准，不应把概括性说明视作完整的第三方许可证文本。
