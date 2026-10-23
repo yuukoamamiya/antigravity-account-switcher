@@ -2,7 +2,7 @@
 
 ## Shell and scripting
 
-- On Windows, use Git Bash for ordinary shell commands. When the execution tool supports shell selection, select `C:/Users/AmamiyaYuuko/scoop/apps/git/current/bin/bash.exe` explicitly.
+- On Windows, use Git Bash for ordinary shell commands. Resolve it from `%USERPROFILE%/scoop/apps/git/current/bin/bash.exe` or another installed Git Bash location; expand the chosen path, then explicitly select that absolute executable path when the execution tool supports shell selection.
 - Prefer Python for non-trivial text processing, structured-data transformations, and logic that would be fragile in shell syntax.
 - Use PowerShell only for Windows-specific tasks such as registry access, services, or Windows management cmdlets, or when Bash and Python are unsuitable. Do not pass Bash syntax to PowerShell.
 - With Git Bash, use POSIX-style paths for Bash-native commands and Windows paths only when the invoked Windows program requires them.
