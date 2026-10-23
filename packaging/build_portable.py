@@ -51,12 +51,13 @@ def source_snapshot(destination: Path) -> str:
         "antigravity_account_switcher.py", "account_core.py", "cache_store.py", "common.py",
         "config.py", "process_control.py", "quota_client.py", "runtime_control.py",
         "switcher_ui.py", "portable_runtime.py", "启动账号切换器.cmd", "启动账号切换器.vbs",
-        ".gitignore", "AGENTS.md",
+        ".gitignore", "AGENTS.md", "pytest.ini",
         ".github/workflows/ci.yml", ".github/workflows/portable-release.yml",
     }
     allowed: list[tuple[str, bytes]] = []
     candidates = [(name, ROOT / name) for name in top_level]
     candidates.extend((path.relative_to(ROOT).as_posix(), path) for path in (ROOT / "tests").glob("test_*.py"))
+    candidates.append(("tests/conftest.py", ROOT / "tests" / "conftest.py"))
     candidates.extend((path.relative_to(ROOT).as_posix(), path) for path in (ROOT / "packaging").glob("*.py"))
     candidates.extend((path.relative_to(ROOT).as_posix(), path) for path in (ROOT / "packaging").glob("*.spec"))
     candidates.extend((path.relative_to(ROOT).as_posix(), path) for path in (ROOT / "packaging" / "licenses").glob("*"))
