@@ -1,0 +1,19 @@
+# Per-user credentials and runtime state
+/local-data/
+/credentials/
+/account-switcher.config.json
+/account-switcher.log
+/quota-cache.json
+*.log
+*cache*.json
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+
+# Security scan and generated reports
+/deepsec-report.json
+/deepsec-report.*
+/*scan-report*
+/*security-report*
+/*.sarif
