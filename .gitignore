@@ -11,6 +11,7 @@
 # External reference material (excluded from public source and releases)
 /local-reference/
 /reference/
+/AGENTS.md
 
 # Build and packaging output
 /dist/

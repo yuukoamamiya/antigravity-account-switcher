@@ -51,7 +51,7 @@ def source_snapshot(destination: Path) -> str:
         "antigravity_account_switcher.py", "account_core.py", "cache_store.py", "common.py",
         "config.py", "process_control.py", "quota_client.py", "runtime_control.py",
         "switcher_ui.py", "portable_runtime.py", "启动账号切换器.cmd", "启动账号切换器.vbs",
-        ".gitignore", "AGENTS.md", "pytest.ini",
+        ".gitignore", "pytest.ini",
         ".github/workflows/ci.yml", ".github/workflows/portable-release.yml",
     }
     allowed: list[tuple[str, bytes]] = []
