@@ -33,6 +33,7 @@ import tkinter as tk
 from tkinter import messagebox
 from cache_store import atomic_save_json, validate_cache
 from process_control import find_processes, terminate_process
+from runtime_control import AccountOperationLocks, SingleInstance, WorkerLifecycle
 
 
 ROOT = Path(__file__).resolve().parent
@@ -245,6 +246,8 @@ class AccountCore:
         self.user_agent = antigravity_user_agent(str(config.get("antigravityExecutable", "")))
         self.log_fn = log_fn or (lambda _message, _level="INFO": None)
         self.credentials = CredentialManager()
+        self.operation_locks = AccountOperationLocks()
+        self.credential_switch_lock = threading.Lock()
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.log_fn(safe_text(message), level)
@@ -311,6 +314,10 @@ class AccountCore:
         return None
 
     def save_account(self, account: Account) -> None:
+        with self.operation_locks.hold(account.account_id):
+            self._save_account_locked(account)
+
+    def _save_account_locked(self, account: Account) -> None:
         text = json.dumps(account.payload, ensure_ascii=False, indent=2) + "\n"
         fd, temporary = tempfile.mkstemp(prefix=account.path.name + ".", suffix=".tmp", dir=account.path.parent)
         try:
@@ -369,14 +376,16 @@ class AccountCore:
         return True
 
     def switch(self, account: Account) -> None:
-        self.stop_antigravity()
-        if self.antigravity_running():
-            raise RuntimeError("Antigravity 仍在运行，已中止凭据写入。")
-        self.log("确认 Antigravity 已退出，开始写入 Windows 凭据。")
-        self.credentials.write(CREDENTIAL_TARGET, account.data)
-        read_back = self.credentials.read(CREDENTIAL_TARGET)
-        if read_back is None or sha256(read_back) != account.digest:
-            raise RuntimeError("凭据写入后的校验失败。")
+        with self.credential_switch_lock:
+            with self.operation_locks.hold(account.account_id):
+                self.stop_antigravity()
+                if self.antigravity_running():
+                    raise RuntimeError("Antigravity 仍在运行，已中止凭据写入。")
+                self.log("确认 Antigravity 已退出，开始写入 Windows 凭据。")
+                self.credentials.write(CREDENTIAL_TARGET, account.data)
+                read_back = self.credentials.read(CREDENTIAL_TARGET)
+                if read_back is None or sha256(read_back) != account.digest:
+                    raise RuntimeError("凭据写入后的校验失败。")
 
     def _opener(self) -> urllib.request.OpenerDirector:
         proxy = str(self.config.get("proxy") or "").strip()
@@ -411,6 +420,10 @@ class AccountCore:
             raise GoogleError("Google 接口返回的数据无法解析。") from None
 
     def _refresh_access_token(self, account: Account) -> str:
+        with self.operation_locks.hold(account.account_id):
+            return self._refresh_access_token_locked(account)
+
+    def _refresh_access_token_locked(self, account: Account) -> str:
         token = account.payload["token"]
         expiry = parse_time(token.get("expiry"))
         if token.get("access_token") and expiry and expiry > datetime.now(timezone.utc) + timedelta(seconds=60):
@@ -556,12 +569,15 @@ class AccountCore:
 
 
 class SwitcherApp:
-    def __init__(self, core: AccountCore, accounts: list[Account], cache: dict[str, Any]) -> None:
+    def __init__(self, core: AccountCore, accounts: list[Account], cache: dict[str, Any], single_instance: SingleInstance) -> None:
         self.core = core
         self.accounts = accounts
         self.cache = cache
         self.current_id = core.current_account_id(accounts)
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.lifecycle = WorkerLifecycle()
+        self.single_instance = single_instance
+        self.closing = False
         self.switch_lock = threading.Lock()
         self.switching = False
         self.quota_refreshing = False
@@ -1042,22 +1058,26 @@ class SwitcherApp:
         self.update_summary()
 
     def switch_account(self, account: Account) -> None:
+        if self.closing:
+            return
         if self.switching or account.account_id == self.current_id:
             return
         self.switching = True
         self.update_cards()
         self.write_log(f"开始切换到账号 {account.account_id}（{account.email}）。")
 
-        def worker() -> None:
+        def worker(_cancel: threading.Event) -> None:
             try:
                 self.core.switch(account)
                 self.events.put(("switch_ok", account))
             except Exception as exc:
                 self.events.put(("switch_error", safe_text(exc)))
 
-        threading.Thread(target=worker, name="agy-switch", daemon=True).start()
+        self.lifecycle.start("agy-switch", worker)
 
     def start_quota_refresh(self) -> None:
+        if self.closing:
+            return
         if self.quota_refreshing or not bool(self.core.config.get("queryQuota", True)):
             return
         self.quota_refreshing = True
@@ -1067,14 +1087,18 @@ class SwitcherApp:
         self.set_quota_status("正在查询额度……")
         self.write_log(f"开始查询 {len(self.accounts)} 个账号的额度。")
 
-        def worker() -> None:
+        def worker(cancel: threading.Event) -> None:
             for account in list(self.accounts):
+                if cancel.is_set():
+                    break
                 self.events.put(("quota_result", self.core.quota(account)))
             self.events.put(("quota_done", None))
 
-        threading.Thread(target=worker, name="agy-quota", daemon=True).start()
+        self.lifecycle.start("agy-quota", worker)
 
     def poll_events(self) -> None:
+        if self.closing:
+            return
         handled_event = False
         try:
             while True:
@@ -1134,6 +1158,8 @@ class SwitcherApp:
             self.write_log(f"额度缓存保存失败：{safe_text(exc)}", "WARN")
 
     def tick(self) -> None:
+        if self.closing:
+            return
         self.update_countdowns()
         new_dark = self.system_dark()
         if new_dark != self.dark:
@@ -1143,6 +1169,19 @@ class SwitcherApp:
         self.root.after(1000, self.tick)
 
     def close(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
+        self.refresh_button.configure(state="disabled")
+        self.set_quota_status("正在安全完成后台操作……")
+        self.lifecycle.request_close(self._finish_close)
+        self.root.after(50, self._poll_close)
+
+    def _poll_close(self) -> None:
+        if not self.lifecycle.ready_to_close():
+            self.root.after(50, self._poll_close)
+
+    def _finish_close(self) -> None:
         self.uninstall_native_drag_guard()
         self.root.destroy()
 
@@ -1193,22 +1232,28 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--quota-only", action="store_true")
     args, _unknown = parser.parse_known_args()
-    config = load_config()
-    core = AccountCore(config)
+    single_instance = SingleInstance()
     try:
-        accounts = core.scan_accounts()
-    except Exception as exc:
-        print(safe_text(exc), file=sys.stderr)
-        return 1
-    if args.self_test:
-        return run_self_test(core, accounts)
-    if args.quota_only:
-        return run_quota_only(core, accounts)
+        if not single_instance.acquire():
+            return 0
+        config = load_config()
+        core = AccountCore(config)
+        try:
+            accounts = core.scan_accounts()
+        except Exception as exc:
+            print(safe_text(exc), file=sys.stderr)
+            return 1
+        if args.self_test:
+            return run_self_test(core, accounts)
+        if args.quota_only:
+            return run_quota_only(core, accounts)
 
-    app = SwitcherApp(core, accounts, load_cache(config))
-    core.log_fn = app.write_log
-    app.run()
-    return 0
+        app = SwitcherApp(core, accounts, load_cache(config), single_instance)
+        core.log_fn = app.write_log
+        app.run()
+        return 0
+    finally:
+        single_instance.release()
 
 
 if __name__ == "__main__":

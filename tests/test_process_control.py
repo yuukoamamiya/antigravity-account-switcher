@@ -3,10 +3,12 @@ from __future__ import annotations
 import subprocess
 import unittest
 import hashlib
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from process_control import ProcessInfo, ProcessQueryError, find_processes
+from runtime_control import AccountOperationLocks
 
 
 class ProcessControlTests(unittest.TestCase):
@@ -14,10 +16,12 @@ class ProcessControlTests(unittest.TestCase):
         from antigravity_account_switcher import AccountCore
 
         core = AccountCore.__new__(AccountCore)
+        core.operation_locks = AccountOperationLocks()
+        core.credential_switch_lock = threading.Lock()
         core.config = {"closeTimeoutSeconds": 0}
         core.log_fn = lambda *_args: None
         core.credentials = Mock()
-        account = SimpleNamespace(data=b"simulated", digest=hashlib.sha256(b"simulated").hexdigest())
+        account = SimpleNamespace(account_id="simulated", data=b"simulated", digest=hashlib.sha256(b"simulated").hexdigest())
 
         with patch("process_control.subprocess.run", side_effect=subprocess.TimeoutExpired("tasklist.exe", 5)):
             with self.assertRaises(ProcessQueryError):
@@ -28,10 +32,12 @@ class ProcessControlTests(unittest.TestCase):
         from antigravity_account_switcher import AccountCore
 
         core = AccountCore.__new__(AccountCore)
+        core.operation_locks = AccountOperationLocks()
+        core.credential_switch_lock = threading.Lock()
         core.config = {"closeTimeoutSeconds": 0}
         core.log_fn = lambda *_args: None
         core.credentials = Mock()
-        account = SimpleNamespace(data=b"simulated", digest="digest")
+        account = SimpleNamespace(account_id="simulated", data=b"simulated", digest="digest")
 
         with patch("process_control.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout=b"")):
             with self.assertRaises(ProcessQueryError):
@@ -42,6 +48,8 @@ class ProcessControlTests(unittest.TestCase):
         from antigravity_account_switcher import AccountCore
 
         core = AccountCore.__new__(AccountCore)
+        core.operation_locks = AccountOperationLocks()
+        core.credential_switch_lock = threading.Lock()
         core.config = {"closeTimeoutSeconds": 0}
         core.log_fn = lambda *_args: None
         running = [ProcessInfo("Antigravity.exe", 1234)]
@@ -62,9 +70,11 @@ class ProcessControlTests(unittest.TestCase):
         from antigravity_account_switcher import AccountCore
 
         core = AccountCore.__new__(AccountCore)
+        core.operation_locks = AccountOperationLocks()
+        core.credential_switch_lock = threading.Lock()
         core.credentials = Mock()
         core.log_fn = lambda *_args: None
-        account = SimpleNamespace(data=b"simulated", digest="digest")
+        account = SimpleNamespace(account_id="simulated", data=b"simulated", digest="digest")
         with patch.object(core, "stop_antigravity", side_effect=RuntimeError("cannot close")):
             with self.assertRaisesRegex(RuntimeError, "cannot close"):
                 core.switch(account)
@@ -74,9 +84,11 @@ class ProcessControlTests(unittest.TestCase):
         from antigravity_account_switcher import AccountCore
 
         core = AccountCore.__new__(AccountCore)
+        core.operation_locks = AccountOperationLocks()
+        core.credential_switch_lock = threading.Lock()
         core.credentials = Mock()
         core.log_fn = lambda *_args: None
-        account = SimpleNamespace(data=b"simulated", digest=hashlib.sha256(b"simulated").hexdigest())
+        account = SimpleNamespace(account_id="simulated", data=b"simulated", digest=hashlib.sha256(b"simulated").hexdigest())
         core.credentials.read.return_value = account.data
         with patch.object(core, "stop_antigravity", return_value=False), patch.object(
             core, "antigravity_running", return_value=False
