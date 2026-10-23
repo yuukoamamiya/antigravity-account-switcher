@@ -9,6 +9,18 @@ from portable_runtime import application_root, portable_paths
 
 
 class PortableRuntimeTests(unittest.TestCase):
+    def test_startup_diagnostics_redact_bearer_tokens_from_message_and_traceback(self):
+        import antigravity_account_switcher as entrypoint
+
+        message, trace = entrypoint.safe_startup_diagnostics(
+            RuntimeError("Bearer synthetic-secret-token"),
+            "Traceback (most recent call last):\nRuntimeError: Bearer synthetic-secret-token",
+        )
+        self.assertNotIn("synthetic-secret-token", message)
+        self.assertNotIn("synthetic-secret-token", trace)
+        self.assertIn("[已隐藏]", message)
+        self.assertIn("[已隐藏]", trace)
+
     def test_frozen_root_tracks_executable_not_cwd_or_bundle_resources(self):
         with tempfile.TemporaryDirectory() as directory:
             moved = Path(directory) / "Portable Folder"
@@ -59,6 +71,16 @@ class PortableRuntimeTests(unittest.TestCase):
             value = json.loads(report.read_text(encoding="utf-8"))
             self.assertTrue(value["ok"])
             self.assertTrue(value["checks"]["tempIo"])
+
+    def test_smoke_report_redacts_synthetic_bearer_error(self):
+        import antigravity_account_switcher as entrypoint
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with patch("portable_runtime.application_root", side_effect=RuntimeError("Bearer synthetic-smoke-secret")):
+                self.assertEqual(entrypoint.run_portable_smoke(str(report)), 1)
+            serialized = report.read_text(encoding="utf-8")
+            self.assertNotIn("synthetic-smoke-secret", serialized)
+            self.assertIn("[已隐藏]", serialized)
 
 
 if __name__ == "__main__":

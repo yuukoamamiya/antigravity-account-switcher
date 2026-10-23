@@ -56,6 +56,12 @@ def run_quota_only(core: AccountCore, accounts: list[Account]) -> int:
     return 0
 
 
+def safe_startup_diagnostics(exc: BaseException, formatted_traceback: str) -> tuple[str, str]:
+    message = safe_text(f"程序启动失败：{type(exc).__name__}: {exc}")
+    trace = "\n".join(safe_text(line) for line in formatted_traceback.splitlines())
+    return message, trace
+
+
 def run_portable_smoke(report_path: str | None = None) -> int:
     """Isolated packaging smoke check; deliberately avoids user data and services."""
     result: dict[str, Any] = {"ok": False, "checks": {}}
@@ -81,7 +87,7 @@ def run_portable_smoke(report_path: str | None = None) -> int:
             result["checks"]["tempIo"] = json.loads(probe.read_text(encoding="utf-8")) == {"smoke": True}
         result["ok"] = all(value is True for key, value in result["checks"].items() if key != "root")
     except BaseException as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
+        result["error"] = safe_text(f"{type(exc).__name__}: {exc}")
     if report_path:
         try:
             target = Path(report_path)
@@ -149,12 +155,12 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        message = f"程序启动失败：{type(exc).__name__}: {exc}"
+        message, safe_traceback = safe_startup_diagnostics(exc, traceback.format_exc())
         try:
             log_path = ROOT / "Data" / "logs" / "account-switcher.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as stream:
-                stream.write(message + "\n" + traceback.format_exc() + "\n")
+                stream.write(message + "\n" + safe_traceback + "\n")
         except Exception:
             pass
         try:
