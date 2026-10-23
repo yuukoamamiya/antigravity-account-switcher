@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import base64
 import json
 import os
 import platform
@@ -150,7 +151,7 @@ class AccountCore:
 
     def scan_accounts(self) -> list[Account]:
         if not self.credentials_dir.exists():
-            raise FileNotFoundError(f"凭据目录不存在：{self.credentials_dir}")
+            return []
         accounts: list[Account] = []
         for path in sorted(self.credentials_dir.glob("account-*.json"), key=lambda p: p.name.lower()):
             if path.name.endswith(".meta.json"):
@@ -160,32 +161,137 @@ class AccountCore:
                 continue
             account_id = match.group(1)
             try:
-                payload = read_json(path)
-                token = payload.get("token", {})
-                if not token.get("access_token") or not token.get("refresh_token"):
-                    raise ValueError("缺少 token 字段")
-                meta_path = path.with_name(path.stem + ".meta.json")
-                email = ""
-                if meta_path.exists():
-                    try:
-                        email = str(read_json(meta_path).get("email") or "")
-                    except Exception:
-                        pass
-                data = path.read_bytes()
-                accounts.append(
-                    Account(
-                        account_id=account_id,
-                        email=email or f"账号 {account_id}",
-                        path=path,
-                        meta_path=meta_path,
-                        payload=payload,
-                        data=data,
-                        digest=sha256(data),
+                with self.operation_locks.hold(account_id):
+                    data = path.read_bytes()
+                    payload = json.loads(data.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("凭据内容必须是 JSON 对象")
+                    token = payload.get("token", {})
+                    if not isinstance(token, dict) or not token.get("access_token") or not token.get("refresh_token"):
+                        raise ValueError("缺少 token 字段")
+                    meta_path = path.with_name(path.stem + ".meta.json")
+                    email = ""
+                    if meta_path.exists():
+                        try:
+                            meta = read_json(meta_path)
+                            if isinstance(meta, dict):
+                                email = str(meta.get("email") or "")
+                        except Exception:
+                            pass
+                    accounts.append(
+                        Account(
+                            account_id=account_id,
+                            email=email or f"账号 {account_id}",
+                            path=path,
+                            meta_path=meta_path,
+                            payload=payload,
+                            data=data,
+                            digest=sha256(data),
+                        )
                     )
-                )
             except Exception as exc:
                 self.log(f"跳过无效账号文件 {path.name}：{safe_text(exc)}", "WARN")
         return accounts
+
+    @staticmethod
+    def _display_email(payload: dict[str, Any]) -> str:
+        """Return an email suitable for display; JWT claims are deliberately unverified."""
+        for value in (payload.get("email"), payload.get("user_email")):
+            if isinstance(value, str) and "@" in value:
+                return value.strip()[:254]
+        user = payload.get("user")
+        if isinstance(user, dict) and isinstance(user.get("email"), str) and "@" in user["email"]:
+            return user["email"].strip()[:254]
+        token = payload.get("token")
+        id_token = token.get("id_token") if isinstance(token, dict) else None
+        if isinstance(id_token, str):
+            try:
+                segment = id_token.split(".")[1]
+                claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+                email = claims.get("email") if isinstance(claims, dict) else None
+                if isinstance(email, str) and "@" in email:
+                    return email.strip()[:254]
+            except (IndexError, ValueError, UnicodeError, json.JSONDecodeError):
+                pass
+        return ""
+
+    def add_current_account(self, display_name: str | None = None) -> tuple[Account, bool]:
+        """Import the current Windows credential without replacing an existing account."""
+        # Serialize with credential switching so the blob cannot be read halfway
+        # through a concurrent switch operation.
+        with self.credential_switch_lock:
+            raw = self.credentials.read(CREDENTIAL_TARGET)
+            if raw is None or not raw:
+                raise ValueError("未找到当前登录账号凭据。")
+            try:
+                text = raw.decode("utf-8")
+                payload = json.loads(text)
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("当前登录账号凭据不是有效的 UTF-8 JSON。") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("当前登录账号凭据必须是 JSON 对象。")
+            token = payload.get("token")
+            if not isinstance(token, dict):
+                raise ValueError("当前登录账号凭据缺少有效 token 对象。")
+            access_token = token.get("access_token")
+            refresh_token = token.get("refresh_token")
+            if not isinstance(access_token, str) or not access_token.strip() or not isinstance(refresh_token, str) or not refresh_token.strip():
+                raise ValueError("当前登录账号凭据缺少 access_token 或 refresh_token。")
+
+            accounts = self.scan_accounts()
+            for account in accounts:
+                stored_refresh = account.payload.get("token", {}).get("refresh_token")
+                if stored_refresh == refresh_token:
+                    # Return the on-disk object so callers retain the latest
+                    # locally refreshed token state and metadata.
+                    return account, False
+
+            self.credentials_dir.mkdir(parents=True, exist_ok=True)
+            number = 1
+            while True:
+                account_id = str(number)
+                path = self.credentials_dir / f"account-{account_id}.json"
+                meta_path = self.credentials_dir / f"account-{account_id}.meta.json"
+                if not path.exists() and not meta_path.exists():
+                    break
+                number += 1
+
+            email = self._display_email(payload)
+            if isinstance(display_name, str) and display_name.strip():
+                email = display_name.strip()[:254]
+            account = Account(account_id, email or f"账号 {account_id}", path, meta_path, payload, raw, sha256(raw))
+            meta = {"payload_sha256": account.digest, "payload_bytes": len(raw)}
+            if email:
+                meta["email"] = email
+
+            with self.operation_locks.hold(account_id):
+                # Link a fully written same-directory temporary file into place
+                # atomically, while refusing to replace a concurrent account.
+                fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=self.credentials_dir)
+                linked = False
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(raw)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.link(temporary, path)
+                    linked = True
+                    os.unlink(temporary)
+                    atomic_save_json(meta_path, meta)
+                except Exception:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                    if linked:
+                        try:
+                            path.unlink()
+                        except OSError:
+                            pass
+                    raise
+            account.data = path.read_bytes()
+            account.digest = sha256(account.data)
+            return account, True
 
     def current_account_id(self, accounts: list[Account]) -> str | None:
         try:

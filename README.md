@@ -46,6 +46,8 @@ local-data/
 
 启用 `queryQuota` 时，启动后会后台查询账号额度；也可使用界面中的“刷新额度”按钮再次查询。额度结果会写入本地缓存，供界面显示。每个账号的查询预算为 45 秒，用于限制后续尝试和各请求的 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。项目/接口路由提示只保存在当前进程内，TTL 为 6 小时，不写入额度缓存。查询需要网络访问 Google 的 Antigravity 额度服务，失败时界面会显示查询状态；关闭 `queryQuota` 可停用额度请求。
 
+可使用“添加当前账号”将 Antigravity 当前登录的 Windows 凭据导入账号列表。此操作只读取 Credential Manager 并写入本地账号文件，不会联网识别身份，也不会关闭或重启 Antigravity。重复账号会按 refresh token 识别并保留本地已有数据；凭据中没有可显示邮箱时，会以账号编号显示。账号文件保存在 `credentialsDirectory` 指定的本地目录。
+
 切换账号会先处理正在运行的 Antigravity 实例，再将目标账号凭据设为当前凭据。请保存 Antigravity 中未完成的工作后再切换。程序也提供 `--self-test` 诊断入口和 `--quota-only` 命令行入口。`--quota-only` 会发起真实网络请求，只在你明确需要时手动运行。`--self-test` 会扫描本机账号文件并读取 Windows Credential Manager，还会输出账号邮箱等信息；不要将它当作无凭据测试或分享其输出。
 
 ## 安全与隐私

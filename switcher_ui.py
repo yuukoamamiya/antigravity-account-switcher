@@ -51,6 +51,7 @@ class SwitcherApp:
         self.lifecycle = WorkerLifecycle()
         self.closing = False
         self.switching = False
+        self.adding_current = False
         self.quota_refreshing = False
         self.quota_successes = 0
         self.quota_failures = 0
@@ -123,9 +124,11 @@ class SwitcherApp:
         self.title_label = tk.Label(self.header, text="Antigravity 账号", font=("Microsoft YaHei UI", 17, "bold"), anchor="w")
         self.title_label.grid(row=0, column=1, sticky="w")
         self.refresh_button = tk.Button(self.header, text="刷新额度", command=self.start_quota_refresh, width=11, relief="flat", cursor="hand2", bd=0)
-        self.refresh_button.grid(row=0, column=2, padx=(18, 0))
+        self.refresh_button.grid(row=0, column=3, padx=(12, 0))
         self.quota_status = tk.Label(self.header, text="额度查询未开始", font=("Microsoft YaHei UI", 8), anchor="e")
-        self.quota_status.grid(row=1, column=2, sticky="e", pady=(2, 0))
+        self.quota_status.grid(row=1, column=3, sticky="e", pady=(2, 0))
+        self.add_account_button = tk.Button(self.header, text="添加当前账号", command=self.add_current_account, width=13, relief="flat", cursor="hand2", bd=0)
+        self.add_account_button.grid(row=0, column=2, padx=(12, 0))
 
         self.summary = tk.Frame(self.root, bg=colors["form"], height=58)
         self.summary.pack(fill="x", padx=24, pady=(0, 14))
@@ -251,6 +254,7 @@ class SwitcherApp:
         self.log_title.configure(bg=colors["form"], fg=colors["secondary"])
         self.scrollbar.configure(bg=colors["panel"], troughcolor=colors["form"], activebackground=colors["border"])
         self.refresh_button.configure(bg=colors["accent"], fg="white", activebackground=colors["accent_hover"], activeforeground="white")
+        self.add_account_button.configure(bg=colors["panel"], fg=colors["text"], activebackground=colors["border"], activeforeground=colors["text"])
         for label, value_label in self.summary_labels:
             tile = label.master
             tile.configure(bg=colors["panel"])
@@ -554,11 +558,12 @@ class SwitcherApp:
         self.update_summary()
 
     def switch_account(self, account: Account) -> None:
-        if self.closing:
+        if self.closing or self.adding_current:
             return
         if self.switching or account.account_id == self.current_id:
             return
         self.switching = True
+        self.add_account_button.configure(state="disabled")
         self.update_cards()
         self.write_log(f"开始切换到账号 {account.account_id}（{account.email}）。")
 
@@ -570,6 +575,46 @@ class SwitcherApp:
                 self.events.put(("switch_error", safe_text(exc)))
 
         self.lifecycle.start("agy-switch", worker)
+
+    def add_current_account(self) -> None:
+        if self.closing or self.switching or self.adding_current:
+            return
+        self.adding_current = True
+        self.add_account_button.configure(state="disabled")
+        self.write_log("正在读取当前登录账号凭据并添加到本地列表。")
+
+        def worker(_cancel: threading.Event) -> None:
+            try:
+                account, added = self.core.add_current_account()
+                self.events.put(("add_current_ok", (account, added)))
+            except Exception as exc:
+                self.events.put(("add_current_error", safe_text(exc)))
+
+        try:
+            self.lifecycle.start("agy-add-current-account", worker)
+        except RuntimeError:
+            self.adding_current = False
+            self.add_account_button.configure(state="normal")
+
+    def handle_add_current_success(self, account: Account, added: bool) -> None:
+        """Apply the import result on Tk's main thread, preserving live objects."""
+        existing = next((item for item in self.accounts if item.account_id == account.account_id), None)
+        if existing is None:
+            self.accounts.append(account)
+            self.build_card(account)
+            self.cache_item(account.account_id)
+            self.redraw_cards()
+        # Do not replace an existing object: a quota worker may still hold it.
+        self.current_id = account.account_id
+        self.adding_current = False
+        self.add_account_button.configure(state="normal" if not self.switching else "disabled")
+        self.update_cards()
+        if added:
+            self.write_log(f"已添加当前登录账号（账号 {account.account_id}）。")
+            messagebox.showinfo("添加成功", f"已添加当前登录账号：{safe_text(account.email)}", parent=self.root)
+        else:
+            self.write_log(f"当前登录账号已在列表中（账号 {account.account_id}），保留本地已有凭据。")
+            messagebox.showinfo("账号已存在", f"当前登录账号已存在：{safe_text(existing.email if existing else account.email)}\n\n已保留本地账号数据。", parent=self.root)
 
     def start_quota_refresh(self) -> None:
         if self.closing:
@@ -611,14 +656,24 @@ class SwitcherApp:
                     account: Account = value
                     self.current_id = account.account_id
                     self.switching = False
+                    self.add_account_button.configure(state="normal")
                     self.update_cards()
                     self.write_log(f"账号 {account.account_id} 已切换成功。Antigravity 未自动重新启动。")
                     messagebox.showinfo("切换成功", f"已切换到：{account.email}\n\n请按你原来的方式重新启动 Antigravity。", parent=self.root)
                 elif kind == "switch_error":
                     self.switching = False
+                    self.add_account_button.configure(state="normal")
                     self.update_cards()
                     self.write_log(f"切换失败：{value}", "ERROR")
                     messagebox.showerror("切换失败", f"{value}\n\n凭据写入只会在确认 Antigravity 退出后执行。", parent=self.root)
+                elif kind == "add_current_ok":
+                    account, added = value
+                    self.handle_add_current_success(account, added)
+                elif kind == "add_current_error":
+                    self.adding_current = False
+                    self.add_account_button.configure(state="normal")
+                    self.write_log(f"添加当前账号失败：{value}", "ERROR")
+                    messagebox.showerror("添加失败", str(value), parent=self.root)
                 elif kind == "quota_result":
                     result = value
                     item = self.cache_item(result["id"])
@@ -674,6 +729,7 @@ class SwitcherApp:
             return
         self.closing = True
         self.refresh_button.configure(state="disabled")
+        self.add_account_button.configure(state="disabled")
         self.set_quota_status("正在安全完成后台操作……")
         self.lifecycle.request_close(self._finish_close)
         self.root.after(50, self._poll_close)
