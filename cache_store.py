@@ -38,7 +38,10 @@ def _validated_bucket(value: Any) -> dict[str, Any] | None:
     fraction = value.get("remainingFraction")
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
         return None
-    fraction = float(fraction)
+    try:
+        fraction = float(fraction)
+    except (OverflowError, TypeError, ValueError):
+        return None
     if not math.isfinite(fraction) or not 0 <= fraction <= 1:
         return None
 

@@ -44,13 +44,14 @@ class ValidateCacheTests(unittest.TestCase):
             "nan": {"weekly": {"remainingFraction": math.nan}},
             "infinity": {"weekly": {"remainingFraction": math.inf}},
             "out-of-range": {"weekly": {"remainingFraction": 1.01}},
+            "huge-integer": {"weekly": {"remainingFraction": 10**400}},
             "bad-reset": {"weekly": {"remainingFraction": 0.2, "resetTime": "tomorrow"}},
             "bad-time": {"observedAt": "not a timestamp", "lastAttemptAt": 3},
         })
 
         self.assertNotIn("bad-record", result)
         self.assertNotIn(12, result)
-        for account_id in ("bad-fraction", "nan", "infinity", "out-of-range", "bad-reset"):
+        for account_id in ("bad-fraction", "nan", "infinity", "out-of-range", "huge-integer", "bad-reset"):
             self.assertIsNone(result[account_id]["fiveHour"] if account_id == "bad-fraction" else result[account_id]["weekly"])
         self.assertIsNone(result["bad-time"]["observedAt"])
         self.assertIsNone(result["bad-time"]["lastAttemptAt"])
