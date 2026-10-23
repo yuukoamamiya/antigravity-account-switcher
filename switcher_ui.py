@@ -14,11 +14,12 @@ import winreg
 from datetime import datetime, timezone
 from typing import Any
 from tkinter import messagebox
+from tkinter import simpledialog
 
 from account_core import Account, AccountCore, CREDENTIAL_TARGET
 from cache_store import atomic_save_json, validate_cache
 from common import parse_time, read_json, safe_text
-from config import resolve_path
+from config import ConfigError, normalize_proxy_setting, resolve_path, save_proxy_setting
 from quota_client import run_quota_batch
 from runtime_control import SingleInstance, WorkerLifecycle
 
@@ -53,6 +54,7 @@ class SwitcherApp:
         self.switching = False
         self.adding_current = False
         self.quota_refreshing = False
+        self.configuring_proxy = False
         self.quota_successes = 0
         self.quota_failures = 0
         self.layout_redraw_job: str | None = None
@@ -129,6 +131,8 @@ class SwitcherApp:
         self.quota_status.grid(row=1, column=3, sticky="e", pady=(2, 0))
         self.add_account_button = tk.Button(self.header, text="添加当前账号", command=self.add_current_account, width=13, relief="flat", cursor="hand2", bd=0)
         self.add_account_button.grid(row=0, column=2, padx=(12, 0))
+        self.proxy_settings_button = tk.Button(self.header, text="代理设置", command=self.configure_proxy, width=10, relief="flat", cursor="hand2", bd=0)
+        self.proxy_settings_button.grid(row=0, column=4, padx=(8, 0))
 
         self.summary = tk.Frame(self.root, bg=colors["form"], height=58)
         self.summary.pack(fill="x", padx=24, pady=(0, 14))
@@ -255,6 +259,7 @@ class SwitcherApp:
         self.scrollbar.configure(bg=colors["panel"], troughcolor=colors["form"], activebackground=colors["border"])
         self.refresh_button.configure(bg=colors["accent"], fg="white", activebackground=colors["accent_hover"], activeforeground="white")
         self.add_account_button.configure(bg=colors["panel"], fg=colors["text"], activebackground=colors["border"], activeforeground=colors["text"])
+        self.proxy_settings_button.configure(bg=colors["panel"], fg=colors["text"], activebackground=colors["border"], activeforeground=colors["text"])
         for label, value_label in self.summary_labels:
             tile = label.master
             tile.configure(bg=colors["panel"])
@@ -558,11 +563,12 @@ class SwitcherApp:
         self.update_summary()
 
     def switch_account(self, account: Account) -> None:
-        if self.closing or self.adding_current:
+        if self.closing or self.adding_current or self.configuring_proxy:
             return
         if self.switching or account.account_id == self.current_id:
             return
         self.switching = True
+        self.update_operation_buttons()
         self.add_account_button.configure(state="disabled")
         self.update_cards()
         self.write_log(f"开始切换到账号 {account.account_id}（{account.email}）。")
@@ -577,9 +583,10 @@ class SwitcherApp:
         self.lifecycle.start("agy-switch", worker)
 
     def add_current_account(self) -> None:
-        if self.closing or self.switching or self.adding_current:
+        if self.closing or self.switching or self.adding_current or self.configuring_proxy:
             return
         self.adding_current = True
+        self.update_operation_buttons()
         self.add_account_button.configure(state="disabled")
         self.write_log("正在读取当前登录账号凭据并添加到本地列表。")
 
@@ -594,7 +601,7 @@ class SwitcherApp:
             self.lifecycle.start("agy-add-current-account", worker)
         except RuntimeError:
             self.adding_current = False
-            self.add_account_button.configure(state="normal")
+            self.update_operation_buttons()
 
     def handle_add_current_success(self, account: Account, added: bool) -> None:
         """Apply the import result on Tk's main thread, preserving live objects."""
@@ -607,7 +614,7 @@ class SwitcherApp:
         # Do not replace an existing object: a quota worker may still hold it.
         self.current_id = account.account_id
         self.adding_current = False
-        self.add_account_button.configure(state="normal" if not self.switching else "disabled")
+        self.update_operation_buttons()
         self.update_cards()
         if added:
             self.write_log(f"已添加当前登录账号（账号 {account.account_id}）。")
@@ -617,11 +624,12 @@ class SwitcherApp:
             messagebox.showinfo("账号已存在", f"当前登录账号已存在：{safe_text(existing.email if existing else account.email)}\n\n已保留本地账号数据。", parent=self.root)
 
     def start_quota_refresh(self) -> None:
-        if self.closing:
+        if self.closing or self.configuring_proxy:
             return
         if self.quota_refreshing or not bool(self.core.config.get("queryQuota", True)):
             return
         self.quota_refreshing = True
+        self.update_operation_buttons()
         self.quota_successes = 0
         self.quota_failures = 0
         self.refresh_button.configure(state="disabled")
@@ -656,13 +664,13 @@ class SwitcherApp:
                     account: Account = value
                     self.current_id = account.account_id
                     self.switching = False
-                    self.add_account_button.configure(state="normal")
+                    self.update_operation_buttons()
                     self.update_cards()
                     self.write_log(f"账号 {account.account_id} 已切换成功。Antigravity 未自动重新启动。")
                     messagebox.showinfo("切换成功", f"已切换到：{account.email}\n\n请按你原来的方式重新启动 Antigravity。", parent=self.root)
                 elif kind == "switch_error":
                     self.switching = False
-                    self.add_account_button.configure(state="normal")
+                    self.update_operation_buttons()
                     self.update_cards()
                     self.write_log(f"切换失败：{value}", "ERROR")
                     messagebox.showerror("切换失败", f"{value}\n\n凭据写入只会在确认 Antigravity 退出后执行。", parent=self.root)
@@ -671,7 +679,7 @@ class SwitcherApp:
                     self.handle_add_current_success(account, added)
                 elif kind == "add_current_error":
                     self.adding_current = False
-                    self.add_account_button.configure(state="normal")
+                    self.update_operation_buttons()
                     self.write_log(f"添加当前账号失败：{value}", "ERROR")
                     messagebox.showerror("添加失败", str(value), parent=self.root)
                 elif kind == "quota_result":
@@ -692,7 +700,7 @@ class SwitcherApp:
                     self.update_card(result["id"])
                 elif kind == "quota_done":
                     self.quota_refreshing = False
-                    self.refresh_button.configure(state="normal")
+                    self.update_operation_buttons()
                     stamp = datetime.now().strftime("%H:%M:%S")
                     if self.quota_failures and self.quota_successes:
                         status = f"部分更新 · {stamp}"
@@ -713,6 +721,63 @@ class SwitcherApp:
         except Exception as exc:
             self.write_log(f"额度缓存保存失败：{safe_text(exc)}", "WARN")
 
+    def update_operation_buttons(self) -> None:
+        """Keep mutually exclusive actions disabled for the full operation."""
+        if self.closing:
+            add_state = refresh_state = proxy_state = "disabled"
+        else:
+            add_state = "disabled" if self.switching or self.adding_current or self.configuring_proxy else "normal"
+            refresh_state = "disabled" if self.quota_refreshing or self.configuring_proxy else "normal"
+            proxy_state = "disabled" if (self.quota_refreshing or self.switching or self.adding_current or self.configuring_proxy) else "normal"
+        self.add_account_button.configure(state=add_state)
+        self.refresh_button.configure(state=refresh_state)
+        self.proxy_settings_button.configure(state=proxy_state)
+
+    @staticmethod
+    def proxy_input_value(proxy: str) -> str:
+        """Show a local listener port; never prefill remote credentials."""
+        from urllib.parse import urlsplit
+
+        try:
+            parsed = urlsplit(proxy)
+            if (parsed.scheme.lower() == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                    and parsed.port and parsed.username is None and parsed.password is None
+                    and parsed.path in ("", "/") and not parsed.query and not parsed.fragment):
+                return str(parsed.port)
+        except ValueError:
+            pass
+        return ""
+
+    def configure_proxy(self) -> None:
+        if self.closing or self.quota_refreshing or self.switching or self.adding_current or self.configuring_proxy:
+            return
+        self.configuring_proxy = True
+        self.update_operation_buttons()
+        current = str(self.core.config.get("proxy") or "")
+        initial = self.proxy_input_value(current)
+        message = "输入本地 HTTP 代理端口（例如 10809），或完整 HTTP 代理地址。留空将关闭代理。"
+        if current and not initial:
+            message += "\n当前已设置自定义代理（内容已隐藏），输入新值将替换它。"
+        try:
+            value = simpledialog.askstring("代理设置", message, initialvalue=initial, parent=self.root)
+            if value is None or self.closing:
+                return
+            try:
+                normalize_proxy_setting(value)
+                saved = save_proxy_setting(value)
+            except ConfigError as exc:
+                messagebox.showerror("代理设置无效", str(exc), parent=self.root)
+                return
+            if self.closing:
+                return
+            self.core.config["proxy"] = saved
+            self.write_log("额度查询代理设置已保存。")
+            messagebox.showinfo("代理设置已保存", "下次刷新额度时将使用新代理。", parent=self.root)
+        finally:
+            self.configuring_proxy = False
+            if not self.closing:
+                self.update_operation_buttons()
+
     def tick(self) -> None:
         if self.closing:
             return
@@ -728,8 +793,7 @@ class SwitcherApp:
         if self.closing:
             return
         self.closing = True
-        self.refresh_button.configure(state="disabled")
-        self.add_account_button.configure(state="disabled")
+        self.update_operation_buttons()
         self.set_quota_status("正在安全完成后台操作……")
         self.lifecycle.request_close(self._finish_close)
         self.root.after(50, self._poll_close)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import math
 import os
 from pathlib import Path
 from typing import Any
+
+from cache_store import atomic_save_json
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "local-data" / "account-switcher.config.json"
@@ -34,6 +37,84 @@ _POSITIVE_NUMBER_FIELDS = ("requestTimeoutSeconds", "quotaDeadlineSeconds", "clo
 
 class ConfigError(ValueError):
     """Invalid local configuration with an actionable message."""
+
+
+def normalize_proxy_setting(value: str) -> str:
+    """Normalize a proxy entered as a local port or an explicit HTTP URL."""
+    if not isinstance(value, str):
+        raise ConfigError("代理设置必须是文本。")
+    text = value.strip()
+    if not text:
+        return ""
+    if text.isdecimal():
+        try:
+            port = int(text)
+        except ValueError:
+            port = 0
+        if not 1 <= port <= 65535:
+            raise ConfigError("本地代理端口必须是 1 到 65535 之间的整数。")
+        return f"http://127.0.0.1:{port}"
+    from urllib.parse import urlsplit
+
+    # urlsplit intentionally strips some control characters; reject them before
+    # parsing so the original input can never be persisted with hidden chars.
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ConfigError("代理地址无效；请输入 1 到 65535 的端口，或带端口的 HTTP 代理 URL（不支持 SOCKS）。")
+    try:
+        parsed = urlsplit(text)
+        port = parsed.port
+        hostname = parsed.hostname or ""
+        if ":" in hostname:
+            ipaddress.IPv6Address(hostname)
+            valid_host = True
+        else:
+            try:
+                ipaddress.IPv4Address(hostname)
+                valid_host = True
+            except ValueError:
+                labels = hostname.rstrip(".").split(".")
+                valid_host = not (all(label.isdecimal() for label in labels) and len(labels) == 4) and bool(hostname) and all(
+                    label and len(label) <= 63 and label[0].isalnum() and label[-1].isalnum()
+                    and all(character.isalnum() or character == "-" for character in label)
+                    for label in labels
+                )
+        valid = (parsed.scheme.lower() == "http" and bool(parsed.hostname)
+                 and port is not None and 1 <= port <= 65535
+                 and valid_host and parsed.path in ("", "/")
+                 and not parsed.query and not parsed.fragment)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ConfigError("代理地址无效；请输入 1 到 65535 的端口，或带端口的 HTTP 代理 URL（不支持 SOCKS）。")
+    return text
+
+
+def save_proxy_setting(value: str, path: str | os.PathLike[str] | None = None) -> str:
+    """Persist only the proxy field, merging against the current on-disk object.
+
+    Environment-derived secrets are intentionally never used when constructing
+    the file. Existing file fields, including unknown fields, remain untouched.
+    """
+    proxy = normalize_proxy_setting(value)
+    config_path = Path(path) if path is not None else CONFIG_PATH
+    try:
+        source_path = config_path
+        if path is None and not config_path.exists() and LEGACY_CONFIG_PATH.exists():
+            source_path = LEGACY_CONFIG_PATH
+        if source_path.exists():
+            raw = json.loads(source_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ConfigError("配置文件内容必须是 JSON 对象，代理设置未保存。")
+            merged = raw
+        else:
+            merged = dict(DEFAULT_CONFIG)
+        merged["proxy"] = proxy
+        atomic_save_json(config_path, merged)
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ConfigError(f"无法保存代理设置到配置文件：{exc}") from exc
+    return proxy
 
 
 def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dict[str, Any]:

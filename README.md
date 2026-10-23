@@ -42,6 +42,8 @@ local-data/
 - `requestTimeoutSeconds`、`quotaDeadlineSeconds`、`quotaMaxWorkers`、`closeTimeoutSeconds`：网络请求 timeout、每账号查询预算、并行账号数和关闭程序等待时间。工作线程数必须为 1 到 4，查询预算默认为 45 秒。
 - `oauthClientId`、`oauthClientSecret`：OAuth 客户端设置。空客户端 ID 会回退到内置默认值；`ANTIGRAVITY_OAUTH_CLIENT_SECRET` 环境变量优先于文件配置。不要把个人密钥写入提交内容。
 
+也可在界面顶部选择“代理设置”，输入本地 HTTP 代理端口（例如 `10809`，会保存为 `http://127.0.0.1:10809`），留空则直连；也接受完整 HTTP 代理地址。正在查询额度时，代理设置会暂时禁用。界面保存后，下一次额度刷新立即使用新设置。手动编辑 `local-data/account-switcher.config.json` 的 `proxy` 字段也可以，但需要重启程序后生效。
+
 ## 刷新与切换
 
 启用 `queryQuota` 时，启动后会后台查询账号额度；也可使用界面中的“刷新额度”按钮再次查询。额度结果会写入本地缓存，供界面显示。每个账号的查询预算为 45 秒，用于限制后续尝试和各请求的 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。项目/接口路由提示只保存在当前进程内，TTL 为 6 小时，不写入额度缓存。查询需要网络访问 Google 的 Antigravity 额度服务，失败时界面会显示查询状态；关闭 `queryQuota` 可停用额度请求。

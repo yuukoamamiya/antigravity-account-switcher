@@ -33,8 +33,10 @@ def app_with(core, accounts=None):
     app.closing = False
     app.switching = False
     app.adding_current = False
+    app.configuring_proxy = False
     app.current_id = None
     app.add_account_button = Mock()
+    app.proxy_settings_button = Mock()
     app.root = Mock()
     app.write_log = Mock()
     app.build_card = Mock(side_effect=lambda item: app.cards.__setitem__(item.account_id, {"account": item, "items": {}}))
