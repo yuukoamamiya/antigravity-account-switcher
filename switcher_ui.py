@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import winreg
 from datetime import datetime, timezone
 from typing import Any
@@ -29,6 +30,15 @@ RDW_INVALIDATE = 0x0001
 RDW_ERASE = 0x0004
 RDW_UPDATENOW = 0x0100
 RDW_ALLCHILDREN = 0x0080
+
+# Canvas card geometry is kept together so redraws, scrolling, and resize
+# handling all use the same bounds.
+CARD_HEIGHT = 124
+CARD_GAP = 10
+CARD_STEP = CARD_HEIGHT + CARD_GAP
+CARD_INSET_X = 2
+CARD_LEFT_WIDTH = 270
+CARD_BUTTON_WIDTH = 124
 
 
 class SwitcherApp:
@@ -59,6 +69,11 @@ class SwitcherApp:
         self.log_path = resolve_path(str(core.config["logFile"]))
 
         self.root = tk.Tk()
+        self.card_fonts = {
+            "small": tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=8),
+            "value": tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=8, weight="bold"),
+            "email": tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=10, weight="bold"),
+        }
         self.root.title("Antigravity 账号切换器")
         self.root.geometry("980x760")
         self.root.minsize(850, 620)
@@ -172,48 +187,53 @@ class SwitcherApp:
             return
         for index, account in enumerate(self.accounts):
             self.create_card_items(account, index, width)
-        total_height = len(self.accounts) * 202 + 2
+        total_height = len(self.accounts) * CARD_STEP + 2
         self.canvas.configure(scrollregion=(0, 0, width, total_height))
         self.update_cards()
 
     def create_card_items(self, account: Account, index: int, width: int) -> None:
         colors = self.colors
         entry = self.cards[account.account_id]
-        x0 = 2
-        x1 = max(width - 2, 700)
-        y0 = index * 202 + 2
-        y1 = y0 + 188
-        button_x = x1 - 142
-        quota_start = x0 + 302
-        quota_gap = 18
-        quota_width = max(150, (button_x - quota_start - quota_gap) // 2)
+        x0 = CARD_INSET_X
+        x1 = max(width - CARD_INSET_X, 700)
+        y0 = index * CARD_STEP + CARD_INSET_X
+        y1 = y0 + CARD_HEIGHT
+        button_x = x1 - CARD_BUTTON_WIDTH - 12
+        quota_start = x0 + CARD_LEFT_WIDTH
+        quota_gap = 12
+        quota_width = max(120, (button_x - quota_start - quota_gap) // 2)
         weekly_x = quota_start + quota_width + quota_gap
         items: dict[str, Any] = {}
 
         items["card"] = self.canvas.create_rectangle(x0, y0, x1, y1, fill=colors["card"], outline=colors["border"])
         items["strip"] = self.canvas.create_rectangle(x0 + 1, y0 + 1, x0 + 5, y1 - 1, fill=colors["accent"], outline="")
-        items["account_label"] = self.canvas.create_text(x0 + 35, y0 + 28, anchor="nw", text=f"ACCOUNT {account.account_id}", font=("Consolas", 8), fill=colors["muted"])
-        items["email"] = self.canvas.create_text(x0 + 35, y0 + 54, anchor="nw", text=account.email, font=("Microsoft YaHei UI", 11, "bold"), fill=colors["text"])
-        items["status"] = self.canvas.create_text(x0 + 35, y0 + 96, anchor="nw", text="", font=("Microsoft YaHei UI", 8), fill=colors["secondary"])
+        left_text_width = max(quota_start - (x0 + 35) - 12, 120)
+        items["account_label"] = self.canvas.create_text(x0 + 35, y0 + 14, anchor="nw", text=self.fit_card_text(f"ACCOUNT {account.account_id}", ("Consolas", 8), left_text_width), font=("Consolas", 8), fill=colors["muted"])
+        items["email"] = self.canvas.create_text(x0 + 35, y0 + 36, anchor="nw", text=self.fit_card_text(account.email, self.card_fonts["email"], left_text_width), font=("Microsoft YaHei UI", 10, "bold"), fill=colors["text"])
+        items["status"] = self.canvas.create_text(x0 + 35, y0 + 62, anchor="nw", text="", width=left_text_width, font=("Microsoft YaHei UI", 8), fill=colors["secondary"])
 
         for prefix, panel_x, title in (("five", quota_start, "5 小时窗口"), ("weekly", weekly_x, "一周窗口")):
-            panel_y = y0 + 12
+            panel_y = y0 + 8
             panel_w = quota_width
-            items[f"{prefix}_panel"] = self.canvas.create_rectangle(panel_x, panel_y, panel_x + panel_w, panel_y + 78, fill=colors["panel"], outline="")
-            items[f"{prefix}_title"] = self.canvas.create_text(panel_x + 14, panel_y + 12, anchor="nw", text=title, font=("Microsoft YaHei UI", 8), fill=colors["muted"])
-            items[prefix] = self.canvas.create_text(panel_x + 14, panel_y + 39, anchor="nw", text="暂无数据", font=("Microsoft YaHei UI", 9, "bold"), fill=colors["text"])
-            bar_x = panel_x + 14
-            bar_y = panel_y + 66
-            bar_w = max(panel_w - 28, 20)
-            items[f"{prefix}_bar_bg"] = self.canvas.create_rectangle(bar_x, bar_y, bar_x + bar_w, bar_y + 5, fill=colors["bar_bg"], outline="")
-            items[f"{prefix}_bar"] = self.canvas.create_rectangle(bar_x, bar_y, bar_x, bar_y + 5, fill=colors["accent"], outline="")
-            items[f"{prefix}_bar_bounds"] = (bar_x, bar_y, bar_w, 5)
+            items[f"{prefix}_panel"] = self.canvas.create_rectangle(panel_x, panel_y, panel_x + panel_w, panel_y + 66, fill=colors["panel"], outline="")
+            items[f"{prefix}_title"] = self.canvas.create_text(panel_x + 10, panel_y + 6, anchor="nw", text=title, font=("Microsoft YaHei UI", 8), fill=colors["muted"])
+            items[prefix] = self.canvas.create_text(panel_x + 10, panel_y + 22, anchor="nw", text="暂无数据", width=max(panel_w - 20, 80), font=("Microsoft YaHei UI", 8, "bold"), fill=colors["text"])
+            bar_x = panel_x + 10
+            bar_y = panel_y + 57
+            bar_w = max(panel_w - 20, 20)
+            items[f"{prefix}_bar_bg"] = self.canvas.create_rectangle(bar_x, bar_y, bar_x + bar_w, bar_y + 4, fill=colors["bar_bg"], outline="")
+            items[f"{prefix}_bar"] = self.canvas.create_rectangle(bar_x, bar_y, bar_x, bar_y + 4, fill=colors["accent"], outline="")
+            items[f"{prefix}_bar_bounds"] = (bar_x, bar_y, bar_w, 4)
 
-        items["updated"] = self.canvas.create_text(quota_start + 4, y0 + 112, anchor="nw", text="", font=("Microsoft YaHei UI", 8), fill=colors["muted"])
-        items["error"] = self.canvas.create_text(x0 + 35, y0 + 154, anchor="nw", text="", width=max(button_x - x0 - 55, 300), font=("Microsoft YaHei UI", 8), fill=colors["warning"])
+        updated_width = max(button_x - quota_start - 8, 140)
+        error_width = max(button_x - (x0 + 35) - 12, 160)
+        items["updated_width"] = updated_width
+        items["error_width"] = error_width
+        items["updated"] = self.canvas.create_text(quota_start + 4, y0 + 82, anchor="nw", text="", width=updated_width, font=("Microsoft YaHei UI", 8), fill=colors["muted"])
+        items["error"] = self.canvas.create_text(x0 + 35, y0 + 103, anchor="nw", text="", font=("Microsoft YaHei UI", 8), fill=colors["warning"])
         button_tag = f"account-button:{account.account_id}"
-        items["button"] = self.canvas.create_rectangle(button_x, y0 + 62, button_x + 126, y0 + 101, fill=colors["accent"], outline="", tags=(button_tag,))
-        items["button_text"] = self.canvas.create_text(button_x + 63, y0 + 81, anchor="center", text="切换到此账号", font=("Microsoft YaHei UI", 9), fill="white", tags=(button_tag,))
+        items["button"] = self.canvas.create_rectangle(button_x, y0 + 43, button_x + CARD_BUTTON_WIDTH, y0 + 79, fill=colors["accent"], outline="", tags=(button_tag,))
+        items["button_text"] = self.canvas.create_text(button_x + CARD_BUTTON_WIDTH // 2, y0 + 61, anchor="center", text="切换到此账号", font=("Microsoft YaHei UI", 9), fill="white", tags=(button_tag,))
         self.canvas.tag_bind(button_tag, "<Button-1>", lambda _event, target=account: self.switch_account(target))
         entry["items"] = items
 
@@ -423,6 +443,22 @@ class SwitcherApp:
         if self.canvas.itemcget(item_id, "text") != text:
             self.canvas.itemconfigure(item_id, text=text)
 
+    def fit_card_text(self, text: str, font: Any, width: int) -> str:
+        """Keep a single-line card label inside its allocated column."""
+        value = safe_text(text)
+        measure_font = font if isinstance(font, tkfont.Font) else tkfont.Font(root=self.root, font=font)
+        if measure_font.measure(value) <= width:
+            return value
+        ellipsis = "…"
+        low, high = 0, len(value)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if measure_font.measure(value[:middle] + ellipsis) <= width:
+                low = middle
+            else:
+                high = middle - 1
+        return value[:low] + ellipsis
+
     def update_countdowns(self) -> None:
         """Update only the countdown labels; quota bars remain untouched."""
         for account in self.accounts:
@@ -431,8 +467,8 @@ class SwitcherApp:
                 continue
             item = self.cache_item(account.account_id)
             items = entry["items"]
-            self.set_canvas_text_if_changed(items["five"], self.format_bucket(item.get("fiveHour")))
-            self.set_canvas_text_if_changed(items["weekly"], self.format_bucket(item.get("weekly")))
+            for prefix, bucket in (("five", item.get("fiveHour")), ("weekly", item.get("weekly"))):
+                self.set_canvas_text_if_changed(items[prefix], self.format_bucket(bucket))
 
     def write_log(self, message: str, level: str = "INFO") -> None:
         message = safe_text(message)
@@ -490,21 +526,23 @@ class SwitcherApp:
         item = self.cache_item(account_id)
         items = entry["items"]
         current = account_id == self.current_id
-        self.set_canvas_text_if_changed(items["status"], "当前已写入 Windows 凭据" if current else "可切换")
+        status_text = "当前账号" if current else "可切换"
+        self.set_canvas_text_if_changed(items["status"], self.fit_card_text(status_text, self.card_fonts["small"], 220))
         self.canvas.itemconfigure(items["status"], fill=colors["success"] if current else colors["secondary"])
         five_bucket = item.get("fiveHour")
         weekly_bucket = item.get("weekly")
-        self.set_canvas_text_if_changed(items["five"], self.format_bucket(five_bucket))
-        self.set_canvas_text_if_changed(items["weekly"], self.format_bucket(weekly_bucket))
+        for prefix, bucket in (("five", five_bucket), ("weekly", weekly_bucket)):
+            self.set_canvas_text_if_changed(items[prefix], self.format_bucket(bucket))
         self.draw_quota_bar(account_id, "fiveHour")
         self.draw_quota_bar(account_id, "weekly")
-        self.set_canvas_text_if_changed(items["updated"], f"数据更新时间：{self.observed_text(item.get('observedAt'))}")
+        updated_text = f"数据更新时间：{self.observed_text(item.get('observedAt'))}"
+        self.set_canvas_text_if_changed(items["updated"], self.fit_card_text(updated_text, self.card_fonts["small"], items["updated_width"]))
         error = str(item.get("error") or "")
         if error and item.get("observedAt"):
             error = f"查询失败（已保留上次数据）：{error}"
         elif error:
             error = f"查询失败：{error}"
-        self.set_canvas_text_if_changed(items["error"], error)
+        self.set_canvas_text_if_changed(items["error"], self.fit_card_text(error, self.card_fonts["small"], items["error_width"]))
         button_color = colors["success"] if current else colors["accent"]
         self.canvas.itemconfigure(items["strip"], fill=button_color if current else colors["accent"])
         self.canvas.itemconfigure(items["button"], fill=button_color)
