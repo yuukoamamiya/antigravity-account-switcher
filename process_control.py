@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import io
+import locale
 import subprocess
 from dataclasses import dataclass
 
@@ -20,10 +22,19 @@ class ProcessInfo:
     pid: int
 
 
+def _tasklist_encoding() -> str:
+    if hasattr(ctypes, "windll"):
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
 def find_processes(image_name: str, *, timeout: float = 5) -> list[ProcessInfo]:
     try:
         result = subprocess.run(
-            ["tasklist.exe", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {image_name}"],
+            # Enumerate the complete process table. tasklist's localized
+            # "no tasks match" message is not CSV, so filtering here makes a
+            # normal absence indistinguishable from a query failure.
+            ["tasklist.exe", "/FO", "CSV", "/NH"],
             capture_output=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=timeout,
@@ -34,7 +45,11 @@ def find_processes(image_name: str, *, timeout: float = 5) -> list[ProcessInfo]:
     if result.returncode != 0:
         raise ProcessQueryError(f"tasklist 查询失败（退出码 {result.returncode}）。")
     try:
-        rows = csv.reader(io.StringIO(result.stdout.decode("utf-8-sig", errors="strict")), strict=True)
+        # tasklist writes using the active Windows OEM code page. Respect it
+        # so localized image names remain parseable while malformed output
+        # still fails closed.
+        encoding = _tasklist_encoding()
+        rows = csv.reader(io.StringIO(result.stdout.decode(encoding, errors="strict")), strict=True)
         found: list[ProcessInfo] = []
         row_count = 0
         for row in rows:

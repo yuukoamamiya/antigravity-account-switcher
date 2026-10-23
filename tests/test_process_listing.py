@@ -31,6 +31,13 @@ class ProcessListingTests(unittest.TestCase):
         with patch("process_control.subprocess.run", return_value=tasklist_result(output)):
             self.assertEqual(find_processes("Antigravity.exe"), [])
 
+    def test_chinese_image_name_from_oem_encoded_output_is_parsed(self) -> None:
+        output = '"应用程序.exe","1234"\r\n'.encode("cp936")
+        with patch("process_control.subprocess.run", return_value=tasklist_result(output)), patch(
+            "process_control._tasklist_encoding", return_value="cp936"
+        ):
+            self.assertEqual(find_processes("应用程序.exe"), [ProcessInfo("应用程序.exe", 1234)])
+
     def test_target_process_pid_must_be_valid_nonzero_dword(self) -> None:
         bad_rows = (
             b'"Antigravity.exe","0"\r\n',

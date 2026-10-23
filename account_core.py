@@ -268,22 +268,34 @@ class AccountCore:
                 # Link a fully written same-directory temporary file into place
                 # atomically, while refusing to replace a concurrent account.
                 fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=self.credentials_dir)
-                linked = False
+                published = False
                 try:
                     with os.fdopen(fd, "wb") as handle:
                         handle.write(raw)
                         handle.flush()
                         os.fsync(handle.fileno())
-                    os.link(temporary, path)
-                    linked = True
-                    os.unlink(temporary)
+                    if os.name == "nt":
+                        # MoveFileW is an atomic same-volume rename and fails
+                        # when the destination exists. Unlike hard links, it
+                        # also works on FAT/exFAT portable drives.
+                        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                        kernel32.MoveFileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+                        kernel32.MoveFileW.restype = wintypes.BOOL
+                        if not kernel32.MoveFileW(temporary, str(path)):
+                            error = ctypes.get_last_error()
+                            raise OSError(error, f"MoveFileW failed ({error})", str(path))
+                    else:
+                        # link() provides exclusive publication on POSIX.
+                        os.link(temporary, path)
+                        os.unlink(temporary)
+                    published = True
                     atomic_save_json(meta_path, meta)
                 except Exception:
                     try:
                         os.unlink(temporary)
                     except OSError:
                         pass
-                    if linked:
+                    if published:
                         try:
                             path.unlink()
                         except OSError:
