@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 import tkinter as tk
 from tkinter import messagebox
+from process_control import find_processes, terminate_process
 
 
 ROOT = Path(__file__).resolve().parent
@@ -335,27 +336,20 @@ class AccountCore:
 
     @staticmethod
     def antigravity_running() -> bool:
-        try:
-            result = subprocess.run(
-                ["tasklist.exe", "/FI", "IMAGENAME eq Antigravity.exe", "/NH"],
-                capture_output=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=5,
-            )
-            return b"Antigravity.exe".lower() in result.stdout.lower()
-        except Exception:
-            return False
+        return bool(find_processes("Antigravity.exe"))
 
     def stop_antigravity(self) -> bool:
-        if not self.antigravity_running():
+        processes = find_processes("Antigravity.exe")
+        if not processes:
             return False
         self.log("正在关闭 Antigravity。")
-        subprocess.run(
-            ["taskkill.exe", "/IM", "Antigravity.exe", "/T"],
-            capture_output=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            timeout=10,
-        )
+        for process in processes:
+            result = terminate_process(process.pid)
+            # taskkill can report failure when the process exited between the
+            # tasklist snapshot and taskkill; verify state before treating it as an error.
+            if result.returncode != 0 and not self.antigravity_running():
+                self.log("Antigravity 已自然退出。")
+                return True
         deadline = time.monotonic() + int(self.config.get("closeTimeoutSeconds", 15))
         while time.monotonic() < deadline:
             if not self.antigravity_running():
@@ -363,12 +357,11 @@ class AccountCore:
                 return True
             time.sleep(0.25)
         self.log("Antigravity 未能正常退出，执行强制关闭。", "WARN")
-        subprocess.run(
-            ["taskkill.exe", "/F", "/IM", "Antigravity.exe", "/T"],
-            capture_output=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            timeout=10,
-        )
+        remaining = find_processes("Antigravity.exe")
+        for process in remaining:
+            result = terminate_process(process.pid, force=True)
+            if result.returncode != 0 and self.antigravity_running():
+                raise RuntimeError(f"无法关闭 Antigravity（PID {process.pid}，taskkill 退出码 {result.returncode}）。")
         time.sleep(0.5)
         if self.antigravity_running():
             raise RuntimeError("无法关闭 Antigravity，请先手动关闭它。")
