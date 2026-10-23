@@ -1,4 +1,5 @@
-# Per-user credentials and runtime state
+# User data and generated portable output
+/Data/
 /local-data/
 /credentials/
 /account-switcher.config.json
@@ -7,9 +8,25 @@
 *.log
 *cache*.json
 
+# External reference material (excluded from public source and releases)
+/local-reference/
+/reference/
+
+# Build and packaging output
+/dist/
+/build/
+/artifacts/
+/.build-env/
+/venv/
+/.venv/
+*.egg-info/
+
 # Python runtime artifacts
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
 
 # Security scan and generated reports
 /deepsec-report.json

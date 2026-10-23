@@ -1,10 +1,10 @@
 {
-  "credentialsDirectory": "local-data/credentials",
+  "credentialsDirectory": "Data/credentials",
   "antigravityExecutable": "Antigravity.exe",
   "proxy": "",
   "noProxy": "localhost,127.0.0.1",
-  "logFile": "local-data/account-switcher.log",
-  "quotaCacheFile": "local-data/quota-cache.json",
+  "logFile": "Data/logs/account-switcher.log",
+  "quotaCacheFile": "Data/cache/quota-cache.json",
   "queryQuota": true,
   "requestTimeoutSeconds": 20,
   "quotaDeadlineSeconds": 45,
