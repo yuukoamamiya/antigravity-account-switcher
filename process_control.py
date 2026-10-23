@@ -7,6 +7,8 @@ import io
 import subprocess
 from dataclasses import dataclass
 
+MAX_WINDOWS_PID = 0xFFFFFFFF
+
 
 class ProcessQueryError(RuntimeError):
     """Raised when process state cannot be determined reliably."""
@@ -32,25 +34,38 @@ def find_processes(image_name: str, *, timeout: float = 5) -> list[ProcessInfo]:
     if result.returncode != 0:
         raise ProcessQueryError(f"tasklist 查询失败（退出码 {result.returncode}）。")
     try:
-        rows = csv.reader(io.StringIO(result.stdout.decode("utf-8-sig", errors="replace")))
-        found = []
+        rows = csv.reader(io.StringIO(result.stdout.decode("utf-8-sig", errors="strict")), strict=True)
+        found: list[ProcessInfo] = []
+        row_count = 0
         for row in rows:
             if not row:
                 continue
-            if row[0].casefold() != image_name.casefold():
-                continue
             if len(row) < 2:
-                raise ValueError("匹配的进程行缺少 PID")
-            pid = int(row[1].replace(",", ""))
-            if pid <= 0:
-                raise ValueError("匹配的进程行包含无效 PID")
-            found.append(ProcessInfo(row[0], pid))
+                raise ValueError("进程行缺少映像名或 PID")
+            row_count += 1
+            if not row[0].strip():
+                raise ValueError("进程行的映像名为空")
+            pid_text = row[1].strip()
+            if not pid_text.isdecimal():
+                raise ValueError("进程行包含非数字 PID")
+            pid = int(pid_text)
+            if pid > MAX_WINDOWS_PID:
+                raise ValueError("进程行包含超出 Windows PID 范围的值")
+            is_target = row[0].casefold() == image_name.casefold()
+            if is_target and pid == 0:
+                raise ValueError("目标进程包含无效 PID 0")
+            if is_target:
+                found.append(ProcessInfo(row[0], pid))
+        if row_count == 0:
+            raise ValueError("tasklist 输出为空")
         return found
-    except (csv.Error, ValueError) as exc:
+    except (csv.Error, UnicodeDecodeError, ValueError) as exc:
         raise ProcessQueryError(f"无法解析 tasklist 的进程状态：{exc}") from exc
 
 
 def terminate_process(pid: int, *, force: bool = False, timeout: float = 10) -> subprocess.CompletedProcess:
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 1 <= pid <= MAX_WINDOWS_PID:
+        raise ValueError(f"PID 必须在 1 到 {MAX_WINDOWS_PID} 之间。")
     command = ["taskkill.exe"]
     if force:
         command.append("/F")
