@@ -1,0 +1,7 @@
+# Pinned packaging toolchain for Windows x64 / CPython 3.14.
+# PyInstaller version pinned for the frozen build environment.
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+packaging==26.2
+pytest==9.1.1
+
