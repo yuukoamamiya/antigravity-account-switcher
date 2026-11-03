@@ -611,6 +611,9 @@ class SwitcherApp:
             self.build_card(account)
             self.cache_item(account.account_id)
             self.redraw_cards()
+        elif account.email and account.email != existing.email:
+            existing.email = account.email
+            self.redraw_cards()
         # Do not replace an existing object: a quota worker may still hold it.
         self.current_id = account.account_id
         self.adding_current = False

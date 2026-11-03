@@ -12,6 +12,8 @@ import re
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +26,13 @@ from quota_client import QuotaClient
 from runtime_control import AccountOperationLocks
 
 CREDENTIAL_TARGET = "gemini:antigravity"
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward credential-bearing requests through a redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def antigravity_user_agent(executable: str) -> str:
@@ -199,9 +208,12 @@ class AccountCore:
         for value in (payload.get("email"), payload.get("user_email")):
             if isinstance(value, str) and "@" in value:
                 return value.strip()[:254]
-        user = payload.get("user")
-        if isinstance(user, dict) and isinstance(user.get("email"), str) and "@" in user["email"]:
-            return user["email"].strip()[:254]
+        for key in ("user", "user_info", "userInfo", "profile", "account"):
+            user = payload.get(key)
+            if isinstance(user, dict):
+                value = user.get("email") or user.get("user_email")
+                if isinstance(value, str) and "@" in value:
+                    return value.strip()[:254]
         token = payload.get("token")
         id_token = token.get("id_token") if isinstance(token, dict) else None
         if isinstance(id_token, str):
@@ -214,6 +226,48 @@ class AccountCore:
             except (IndexError, ValueError, UnicodeError, json.JSONDecodeError):
                 pass
         return ""
+
+    def _userinfo_email(self, access_token: str) -> str:
+        """Resolve an email from Google's userinfo endpoint using configured proxy policy."""
+        request = urllib.request.Request(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            # QuotaClient's opener applies the application's explicit proxy and
+            # disables environment proxy discovery when no proxy is configured.
+            opener = self.quota_client.opener_factory()
+            opener.add_handler(_NoRedirectHandler())
+            with opener.open(
+                request, timeout=float(self.config.get("requestTimeoutSeconds", 20))
+            ) as response:
+                if response.geturl() != request.full_url:
+                    return ""
+                raw = response.read(65537)
+            if len(raw) > 65536:
+                return ""
+            value = json.loads(raw.decode("utf-8"))
+            return self._display_email(value) if isinstance(value, dict) else ""
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return ""
+        except (urllib.error.URLError, TimeoutError, OSError, UnicodeError, ValueError):
+            # Account import remains useful when userinfo is unavailable.
+            return ""
+
+    def _save_email_metadata_locked(self, account: Account, email: str) -> None:
+        account.email = email
+        meta: dict[str, Any] = {"payload_sha256": account.digest, "payload_bytes": len(account.data)}
+        if account.meta_path.exists():
+            try:
+                existing = read_json(account.meta_path)
+                if isinstance(existing, dict):
+                    meta.update(existing)
+            except Exception:
+                pass
+        meta["email"] = email
+        atomic_save_json(account.meta_path, meta)
 
     def add_current_account(self, display_name: str | None = None) -> tuple[Account, bool]:
         """Import the current Windows credential without replacing an existing account."""
@@ -242,6 +296,14 @@ class AccountCore:
             for account in accounts:
                 stored_refresh = account.payload.get("token", {}).get("refresh_token")
                 if stored_refresh == refresh_token:
+                    email = display_name.strip()[:254] if isinstance(display_name, str) and display_name.strip() else self._display_email(payload)
+                    if not email and account.email.startswith("账号 "):
+                        email = self._display_email(account.payload)
+                    if not email and account.email.startswith("账号 "):
+                        email = self._userinfo_email(access_token)
+                    if email and email != account.email:
+                        with self.operation_locks.hold(account.account_id):
+                            self._save_email_metadata_locked(account, email)
                     # Return the on-disk object so callers retain the latest
                     # locally refreshed token state and metadata.
                     return account, False
@@ -256,9 +318,9 @@ class AccountCore:
                     break
                 number += 1
 
-            email = self._display_email(payload)
-            if isinstance(display_name, str) and display_name.strip():
-                email = display_name.strip()[:254]
+            email = display_name.strip()[:254] if isinstance(display_name, str) and display_name.strip() else self._display_email(payload)
+            if not email:
+                email = self._userinfo_email(access_token)
             account = Account(account_id, email or f"账号 {account_id}", path, meta_path, payload, raw, sha256(raw))
             meta = {"payload_sha256": account.digest, "payload_bytes": len(raw)}
             if email:

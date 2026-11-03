@@ -6,7 +6,7 @@
 
 普通用户请从 GitHub Releases 下载 `AntigravityAccountSwitcherPortable-0.1.0-win10-x64-portable.zip`，解压后运行 `AntigravityAccountSwitcherPortable.exe`。便携版适用于 Windows x86-64；不提供 32 位或 ARM 构建。
 
-首次使用前，先安装并启动官方 Antigravity 应用，登录你要导入的账号，然后回到切换器点击“添加当前账号”。之后可在切换器设置本地代理端口（例如 `10809`）并刷新额度。代理只用于额度查询。
+首次使用前，先安装并启动官方 Antigravity 应用，登录你要导入的账号，然后回到切换器点击“添加当前账号”。之后可在切换器设置本地代理端口（例如 `10809`）并刷新额度。代理用于额度查询，以及在账号凭据本身不含邮箱时向 Google userinfo 查询账号邮箱。
 
 切换账号会关闭正在运行的官方 Antigravity 应用，再设置目标账号凭据。请先保存官方应用中的未完成工作。添加当前账号则不会关闭官方应用。
 

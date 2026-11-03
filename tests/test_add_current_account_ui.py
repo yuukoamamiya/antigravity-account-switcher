@@ -82,6 +82,18 @@ class AddCurrentAccountUiTests(unittest.TestCase):
         self.assertEqual(app.current_id, "7")
         app.build_card.assert_not_called()
 
+    def test_duplicate_email_backfill_updates_live_account_and_redraws(self):
+        existing = account(email="账号 7")
+        returned = account(email="resolved@example.invalid")
+        core = SimpleNamespace(add_current_account=Mock(return_value=(returned, False)))
+        app = app_with(core, [existing])
+        app.add_current_account()
+        with patch("switcher_ui.messagebox.showinfo"):
+            self.dispatch_worker(app)
+        self.assertIs(app.accounts[0], existing)
+        self.assertEqual(existing.email, "resolved@example.invalid")
+        app.redraw_cards.assert_called_once()
+
     def test_failure_restores_button_and_operation_flag(self):
         core = SimpleNamespace(add_current_account=Mock(side_effect=ValueError("simulated invalid credential")))
         app = app_with(core)
