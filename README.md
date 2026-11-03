@@ -4,7 +4,7 @@
 
 ## 下载与首次使用
 
-普通用户请从 GitHub Releases 下载 `AntigravityAccountSwitcherPortable-0.1.0-win10-x64-portable.zip`，解压后运行 `AntigravityAccountSwitcherPortable.exe`。便携版适用于 Windows x86-64；不提供 32 位或 ARM 构建。
+普通用户请从 GitHub Releases 下载 `AntigravityAccountSwitcherPortable-0.1.1-win10-x64-portable.zip`，解压后运行 `AntigravityAccountSwitcherPortable.exe`。便携版适用于 Windows x86-64；不提供 32 位或 ARM 构建。
 
 首次使用前，先安装并启动官方 Antigravity 应用，登录你要导入的账号，然后回到切换器点击“添加当前账号”。之后可在切换器设置本地代理端口（例如 `10809`）并刷新额度。代理用于额度查询，以及在账号凭据本身不含邮箱时向 Google userinfo 查询账号邮箱。
 
@@ -64,8 +64,8 @@ python -m pip install -r requirements-build.txt
 python packaging/build_portable.py
 ```
 
-该构建会在 `dist/` 生成便携 ZIP、源码 ZIP 和 SHA-256 清单；源码包名称为 `AntigravityAccountSwitcherPortable-0.1.0-source.zip`。普通源码运行仍支持 Python 3.10 或更新版本。
+该构建会在 `dist/` 生成便携 ZIP、源码 ZIP 和 SHA-256 清单；源码包名称为 `AntigravityAccountSwitcherPortable-0.1.1-source.zip`。普通源码运行仍支持 Python 3.10 或更新版本。
 
 本项目原创 Python 源码按 MIT License 发布，第三方运行时和依赖遵循各自许可证，详见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。仓库开发历史包含不随发布包分发的外部 Electron 应用参考片段；其来源许可尚未核实。上游产品参考、原创代码的 MIT 许可边界及历史参考文件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-GitHub Actions 的 `portable-release` workflow 可在 Fork 的默认分支通过 `workflow_dispatch` 手动打包，生成 `AntigravityAccountSwitcherPortable-0.1.0-win10-x64-portable.zip` 和 `AntigravityAccountSwitcherPortable-0.1.0-source.zip`。`ci.yml` 仅在 main 分支推送和 Pull Request 时运行测试。维护者推送与 `VERSION` 一致的 `v0.1.0` 标签后，`portable-release` 会构建并创建草稿 Release，最终由维护者人工发布。项目不提供自动更新，也没有代码签名；请从项目 GitHub Releases 获取发布包并核对发布说明。
+GitHub Actions 的 `portable-release` workflow 可在 Fork 的默认分支通过 `workflow_dispatch` 手动打包，生成 `AntigravityAccountSwitcherPortable-0.1.1-win10-x64-portable.zip` 和 `AntigravityAccountSwitcherPortable-0.1.1-source.zip`。`ci.yml` 仅在 main 分支推送和 Pull Request 时运行测试。维护者推送与 `VERSION` 一致的 `v0.1.1` 标签后，`portable-release` 会构建并创建草稿 Release，最终由维护者人工发布。项目不提供自动更新，也没有代码签名；请从项目 GitHub Releases 获取发布包并核对发布说明。
