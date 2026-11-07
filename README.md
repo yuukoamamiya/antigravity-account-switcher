@@ -42,7 +42,7 @@ python antigravity_account_switcher.py
 
 示例配置见 [`account-switcher.config.example.json`](account-switcher.config.example.json)。配置中的相对路径以便携根目录（即 EXE 所在目录）为基准；需要保存到 Data 的配置路径会明确包含 `Data/`。可在界面顶部选择“代理设置”，输入本地 HTTP 代理端口（例如 `10809`，会保存为 `http://127.0.0.1:10809`），留空则直连；也接受完整 HTTP 代理地址。查询进行时代理设置会暂时禁用。通过界面保存的设置在下一次额度刷新时生效；手动编辑配置文件中的 `proxy` 字段需要重启程序。
 
-启用 `queryQuota` 时，程序启动后会在后台查询额度；也可手动刷新。每个账号的查询预算为 45 秒，用于限制后续尝试及请求 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。查询失败时界面会显示状态。`--quota-only` 会发起真实网络请求，只在明确需要时手动运行。
+启用 `queryQuota` 时，程序启动后会在后台查询额度；也可手动刷新。额度查询仅使用 Google 生产接口，不会回退到 daily 或 sandbox 接口。每个账号的查询预算为 45 秒，用于限制请求 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。查询失败时界面会显示状态。`--quota-only` 会发起真实网络请求，只在明确需要时手动运行。
 
 ## 隐私与安全
 

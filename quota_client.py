@@ -24,13 +24,9 @@ from common import parse_time as _parse_time, safe_text as _safe_text
 
 
 PROJECT_ENDPOINTS = (
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
-    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist",
     "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
 )
 QUOTA_ENDPOINTS = (
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
 )
 OAUTH_URL = "https://oauth2.googleapis.com/token"
@@ -154,6 +150,17 @@ class QuotaClient:
         except (TypeError, ValueError, OverflowError):
             self.cache.pop(account_id, None)
             return {}
+        # Older releases cached daily/sandbox routing for six hours. Never
+        # reuse a project id learned from those environments with production.
+        if value.get("projectEndpoint") not in PROJECT_ENDPOINTS:
+            value.pop("projectEndpoint", None)
+            value.pop("projectId", None)
+        if value.get("quotaEndpoint") not in QUOTA_ENDPOINTS:
+            value.pop("quotaEndpoint", None)
+        if value:
+            self.cache[account_id] = value
+        else:
+            self.cache.pop(account_id, None)
         return value
 
     def _store(self, account_id: str, **values: Any) -> None:

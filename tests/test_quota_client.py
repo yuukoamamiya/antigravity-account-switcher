@@ -69,23 +69,22 @@ class QuotaClientTests(unittest.TestCase):
         )
         return client, opener
 
-    def test_deadline_stops_fallback_and_bounds_each_timeout(self):
+    def test_deadline_stops_after_project_discovery_and_bounds_timeout(self):
         def callback(request, timeout):
             self.assertLessEqual(timeout, 10)
-            self.now += 4
+            self.now += 5
             raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
 
         client, opener = self.make_client(callback, budget=5)
         result = client.quota(account())
         self.assertFalse(result["success"])
-        self.assertEqual(len(opener.calls), 2)  # second discovery gets only remaining budget
+        self.assertEqual(len(opener.calls), 1)
         self.assertLessEqual(opener.calls[0][1], 5)
-        self.assertLessEqual(opener.calls[1][1], 1)
         self.assertIn("总耗时限制", result["error"])
 
     def test_cached_project_and_endpoint_are_used_first(self):
-        cached_endpoint = QUOTA_ENDPOINTS[2]
-        cached_project_endpoint = PROJECT_ENDPOINTS[2]
+        cached_endpoint = QUOTA_ENDPOINTS[0]
+        cached_project_endpoint = PROJECT_ENDPOINTS[0]
         cache = {"acct": {
             "projectId": "cached-project", "projectEndpoint": cached_project_endpoint,
             "quotaEndpoint": cached_endpoint, "expiresAt": self.wall.timestamp() + 100,
@@ -102,26 +101,56 @@ class QuotaClientTests(unittest.TestCase):
         self.assertTrue(client.quota(account())["success"])
         self.assertEqual([call[0] for call in opener.calls], [cached_endpoint])
 
-    def test_stale_cache_is_invalidated_and_failure_then_recovery(self):
+    def test_expired_cache_is_invalidated_and_production_routes_are_discovered(self):
         cache = {"acct": {"projectId": "old", "quotaEndpoint": QUOTA_ENDPOINTS[0], "expiresAt": self.wall.timestamp() - 1}}
-        count = 0
 
         def callback(request, _timeout):
-            nonlocal count
-            count += 1
             if request.full_url in PROJECT_ENDPOINTS:
                 return Response({"cloudaicompanionProject": "new"})
-            if request.full_url == QUOTA_ENDPOINTS[0] and count == 2:
-                raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
-            if request.full_url == QUOTA_ENDPOINTS[1]:
-                return Response(quota_response())
             return Response(quota_response())
 
-        client, _ = self.make_client(callback, cache=cache)
-        first = client.quota(account())
-        self.assertTrue(first["success"])
+        client, opener = self.make_client(callback, cache=cache)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
         self.assertEqual(cache["acct"]["projectId"], "new")
-        self.assertEqual(cache["acct"]["quotaEndpoint"], QUOTA_ENDPOINTS[1])
+        self.assertEqual(cache["acct"]["projectEndpoint"], PROJECT_ENDPOINTS[0])
+        self.assertEqual(cache["acct"]["quotaEndpoint"], QUOTA_ENDPOINTS[0])
+        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
+
+    def test_future_staging_hints_are_discarded_before_production_discovery(self):
+        cache = {"acct": {
+            "projectId": "staging-project",
+            "projectEndpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist",
+            "quotaEndpoint": "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "expiresAt": self.wall.timestamp() + 3600,
+        }}
+
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "production-project"})
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                self.assertEqual(json.loads(request.data), {"project": "production-project"})
+                return Response(quota_response())
+            self.fail(f"unexpected endpoint: {request.full_url}")
+
+        client, opener = self.make_client(callback, cache=cache)
+        self.assertTrue(client.quota(account())["success"])
+        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
+        self.assertEqual(cache["acct"]["projectId"], "production-project")
+
+    def test_production_failures_do_not_fall_back_to_staging(self):
+        def callback(request, _timeout):
+            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
+        self.assertTrue(all("daily-cloudcode-pa" not in call[0] and ".sandbox." not in call[0] for call in opener.calls))
+
+    def test_endpoint_constants_are_production_only(self):
+        self.assertEqual(PROJECT_ENDPOINTS, ("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",))
+        self.assertEqual(QUOTA_ENDPOINTS, ("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",))
 
     def test_auth_and_rate_limit_fail_without_endpoint_walk(self):
         for status in (401, 403, 429):
