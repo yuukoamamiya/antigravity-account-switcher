@@ -82,6 +82,23 @@ class QuotaClientTests(unittest.TestCase):
         self.assertLessEqual(opener.calls[0][1], 5)
         self.assertIn("总耗时限制", result["error"])
 
+    def test_shared_deadline_bounds_quota_request_after_project_discovery(self):
+        def callback(request, timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                self.now += 4
+                return Response({"cloudaicompanionProject": "production-project"})
+            self.assertEqual(request.full_url, QUOTA_ENDPOINTS[0])
+            self.assertLessEqual(timeout, 1)
+            self.now += 1
+            return Response(quota_response())
+
+        client, opener = self.make_client(callback, budget=5)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
+        self.assertLessEqual(opener.calls[1][1], 1)
+        self.assertIn("总耗时限制", result["error"])
+
     def test_cached_project_and_endpoint_are_used_first(self):
         cached_endpoint = QUOTA_ENDPOINTS[0]
         cached_project_endpoint = PROJECT_ENDPOINTS[0]
