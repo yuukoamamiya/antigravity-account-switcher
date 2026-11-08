@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import ipaddress
 import math
@@ -20,13 +19,6 @@ CONFIG_PATH = PORTABLE_PATHS["config"]
 LOCAL_CONFIG_PATH = ROOT / "local-data" / "account-switcher.config.json"
 LEGACY_CONFIG_PATH = ROOT / "account-switcher.config.json"
 OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-# Public OAuth client parameters shipped with the official Antigravity desktop
-# app. The token endpoint rejects refresh requests without them. Encoded at rest
-# so secret scanners do not treat this public value as a leaked credential.
-_BUILTIN_DESKTOP_CLIENT_PARAMS = base64.b64decode(
-    "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY="
-).decode("ascii")
-OAUTH_CLIENT_SECRET = _BUILTIN_DESKTOP_CLIENT_PARAMS
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "credentialsDirectory": "Data/credentials",
@@ -41,7 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "quotaMaxWorkers": 2,
     "closeTimeoutSeconds": 15,
     "oauthClientId": OAUTH_CLIENT_ID,
-    "oauthClientSecret": OAUTH_CLIENT_SECRET,
+    "oauthClientSecret": "",
 }
 _STRING_FIELDS = ("credentialsDirectory", "antigravityExecutable", "proxy", "noProxy", "logFile", "quotaCacheFile", "oauthClientId", "oauthClientSecret")
 _POSITIVE_NUMBER_FIELDS = ("requestTimeoutSeconds", "quotaDeadlineSeconds", "closeTimeoutSeconds")
@@ -160,7 +152,6 @@ def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dic
     result["oauthClientSecret"] = (
         env.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
         or result["oauthClientSecret"]
-        or OAUTH_CLIENT_SECRET
     )
     return result
 

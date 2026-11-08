@@ -24,7 +24,7 @@ AntigravityAccountSwitcherPortable/
 
 配置和运行数据默认保存在 `Data/`：`Data/settings/account-switcher.config.json`、`Data/credentials/`、`Data/logs/account-switcher.log` 和 `Data/cache/quota-cache.json`。这些文件以明文保存在本机，不加密。请保护整个目录，不要分享或上传它，也不要将个人数据粘贴到问题、截图或日志中。已有 `local-data/` 私有配置仍可兼容读取；程序不会主动迁移或删除该目录。新电脑上需要先登录官方 Antigravity，再使用“添加当前账号”导入凭据。
 
-“便携”表示程序可从解压目录运行，不保证不写入系统位置：切换账号功能会读取和写入 Windows Credential Manager，这是功能所需行为。额度刷新使用 Google OAuth 和非公开额度接口，并保持 TLS 证书验证。接口或授权要求可能变化，因此不能保证新用户一定能成功刷新；发生 OAuth 刷新失败时，额度状态会显示错误。程序内置官方 Antigravity 桌面客户端的公开 OAuth 客户端参数用于刷新令牌；如需覆盖，可设置 `oauthClientSecret` 配置项或 `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 环境变量。关闭额度查询可在配置中设置 `queryQuota` 为 `false`。
+“便携”表示程序可从解压目录运行，不保证不写入系统位置：切换账号功能会读取和写入 Windows Credential Manager，这是功能所需行为。额度刷新使用 Google OAuth 和非公开额度接口，并保持 TLS 证书验证。接口或授权要求可能变化，因此不能保证新用户一定能成功刷新；发生 OAuth 刷新失败时，额度状态会显示错误。刷新令牌时，程序会从本机已安装的官方 Antigravity 客户端读取其公开 OAuth 客户端参数，不会写入配置文件或日志；如需覆盖，可设置 `oauthClientSecret` 配置项或 `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 环境变量。关闭额度查询可在配置中设置 `queryQuota` 为 `false`。
 
 升级时先退出切换器，将新版压缩包解压到临时目录，然后用新版 `AntigravityAccountSwitcherPortable.exe`、`App/` 和 `Other/` 替换旧版本对应内容，保留原有 `Data/`。替换前建议关闭应用并备份 Data。不要用新包中的空 Data 覆盖已有数据。
 

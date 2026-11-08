@@ -255,7 +255,7 @@ class QuotaClientTests(unittest.TestCase):
         self.assertEqual(cache["acct"]["projectId"], "new")
         self.assertEqual(opener.calls[0][0], PROJECT_ENDPOINTS[0])
 
-    def test_oauth_refresh_sends_official_client_secret(self):
+    def test_oauth_refresh_uses_configured_client_secret(self):
         def callback(request, _timeout):
             if request.full_url == "https://oauth2.googleapis.com/token":
                 form = urllib.parse.parse_qs(request.data.decode())
@@ -271,6 +271,65 @@ class QuotaClientTests(unittest.TestCase):
         client, _ = self.make_client(callback, config={"oauthClientSecret": "simulated-secret"})
         result = client.quota(account(expiry="2000-01-01T00:00:00+00:00"))
         self.assertTrue(result["success"])
+
+    def test_oauth_refresh_reads_secret_from_installed_language_server(self):
+        import tempfile
+        from pathlib import Path
+
+        first_id = "111111-personalclientidabcdefghij.apps.googleusercontent.com"
+        second_id = "222222-enterpriseclientidabcdefgh.apps.googleusercontent.com"
+        first_client_value = "GOCSPX-" + "A" * 28
+        second_client_value = "GOCSPX-" + "B" * 28
+        attempts = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "resources" / "bin" / "language_server.exe"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(
+                f" {first_id} {second_id} ".encode()
+                + f" {first_client_value} {second_client_value} ".encode()
+            )
+            executable = root / "Antigravity.exe"
+
+            def callback(request, _timeout):
+                if request.full_url == "https://oauth2.googleapis.com/token":
+                    secret = urllib.parse.parse_qs(request.data.decode())["client_secret"][0]
+                    attempts.append(secret)
+                    if secret == first_client_value:
+                        raise HTTPError(request.full_url, 400, "invalid_client", {}, io.BytesIO())
+                    return Response({"access_token": "fresh-access", "expires_in": 3600})
+                if request.full_url == PROJECT_ENDPOINTS[0]:
+                    return Response({"cloudaicompanionProject": "project-1"})
+                if request.full_url == MODELS_ENDPOINTS[0]:
+                    return Response(models_response())
+                return Response({"groups": []})
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": directory, "PROGRAMFILES": directory}):
+                client, _ = self.make_client(callback, config={
+                    "oauthClientId": first_id,
+                    "antigravityExecutable": str(executable),
+                })
+                result = client.quota(account(expiry="2000-01-01T00:00:00+00:00"))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(attempts, [first_client_value, second_client_value])
+
+    def test_oauth_refresh_reports_missing_client_secret(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "Antigravity.exe"
+            with patch.dict(os.environ, {"LOCALAPPDATA": directory, "PROGRAMFILES": directory}):
+                client, _ = self.make_client(
+                    lambda *_: self.fail("no request should be sent"),
+                    config={"antigravityExecutable": str(executable)},
+                )
+                result = client.quota(account(expiry="2000-01-01T00:00:00+00:00"))
+
+        self.assertFalse(result["success"])
+        self.assertIn("OAuth", result["error"])
 
     def test_401_stops_all_further_requests(self):
         def callback(request, _timeout):

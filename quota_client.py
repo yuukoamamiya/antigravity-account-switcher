@@ -29,7 +29,9 @@ import urllib.parse
 import urllib.request
 import base64
 import concurrent.futures
+import mmap
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from common import parse_time as _parse_time, safe_text as _safe_text
@@ -38,6 +40,8 @@ from common import parse_time as _parse_time, safe_text as _safe_text
 DAILY_HOST = "https://daily-cloudcode-pa.googleapis.com"
 PRODUCTION_HOST = "https://cloudcode-pa.googleapis.com"
 SANDBOX_HOST = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+_CLIENT_ID_PATTERN = re.compile(rb"\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com")
+_CLIENT_SECRET_PATTERN = re.compile(rb"GOCSPX-[A-Za-z0-9_-]{28}")
 
 # Daily is the host the official language server queries and the only one
 # observed to return every quota group. Production and sandbox remain bounded
@@ -98,6 +102,8 @@ class QuotaClient:
         self.monotonic = monotonic
         self.wall_clock = wall_clock
         self.opener_factory = opener_factory or self._opener
+        self._client_credentials: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._working_oauth_secret: str | None = None
 
     def _opener(self) -> urllib.request.OpenerDirector:
         proxy = str(self.config.get("proxy") or "").strip()
@@ -149,30 +155,91 @@ class QuotaClient:
         except json.JSONDecodeError:
             raise QuotaError("Google 接口返回的数据无法解析。") from None
 
+    def _installed_client_credentials(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Read the official client id/secret pair from the installed app.
+
+        The Quota endpoints require the same public OAuth client the official
+        Antigravity app uses. Rather than committing that value, extract it from
+        the installed ``language_server.exe`` at runtime. Nothing is persisted.
+        """
+        if self._client_credentials is not None:
+            return self._client_credentials
+        ids: list[str] = []
+        secrets: list[str] = []
+        for path in _language_server_candidates(str(self.config.get("antigravityExecutable") or "")):
+            try:
+                with open(path, "rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                    ids.extend(match.group().decode("ascii") for match in _CLIENT_ID_PATTERN.finditer(data))
+                    secrets.extend(match.group().decode("ascii") for match in _CLIENT_SECRET_PATTERN.finditer(data))
+            except (OSError, ValueError):
+                continue
+        self._client_credentials = (
+            tuple(dict.fromkeys(ids)),
+            tuple(dict.fromkeys(secrets)),
+        )
+        return self._client_credentials
+
+    def _oauth_client_secrets(self) -> tuple[str, ...]:
+        explicit = str(self.config.get("oauthClientSecret") or "").strip()
+        if explicit:
+            return (explicit,)
+        ids, secrets = self._installed_client_credentials()
+        if not secrets:
+            return ()
+        client_id = str(self.config.get("oauthClientId") or "").strip()
+        ordered: list[str] = []
+        if client_id and client_id in ids and len(ids) == len(secrets):
+            # The binary lists the matching id/secret pairs in the same order.
+            index = ids.index(client_id)
+            ordered.append(secrets[index])
+            ordered.extend(secret for position, secret in enumerate(secrets) if position != index)
+        else:
+            ordered.extend(secrets)
+        return tuple(dict.fromkeys(ordered))
+
     def _refresh_token(self, account: Any, deadline: float) -> str:
         token = account.payload["token"]
         expiry = _parse_time(token.get("expiry"))
         if token.get("access_token") and expiry and expiry > self.wall_clock() + timedelta(seconds=60):
             return str(token["access_token"])
-        form = urllib.parse.urlencode({
-            "client_id": self.config.get("oauthClientId", ""),
-            "client_secret": self.config.get("oauthClientSecret") or os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET", ""),
-            "refresh_token": token.get("refresh_token", ""),
-            "grant_type": "refresh_token",
-        }).encode("utf-8")
-        try:
-            value = self._request(OAUTH_URL, None, {}, deadline, form=form)
-        except _HttpQuotaError as exc:
-            raise QuotaError(f"Google OAuth 刷新失败（HTTP {exc.code}）。") from None
-        access = value.get("access_token")
-        if not access:
-            raise QuotaError("Google OAuth 响应中没有 access_token。")
-        token["access_token"] = access
-        token["expiry"] = (self.wall_clock() + timedelta(seconds=int(value.get("expires_in", 3600)))).isoformat()
-        if value.get("refresh_token"):
-            token["refresh_token"] = value["refresh_token"]
-        self.save_account(account)
-        return str(access)
+        secrets = self._oauth_client_secrets()
+        if self._working_oauth_secret:
+            secrets = (self._working_oauth_secret,) + tuple(
+                secret for secret in secrets if secret != self._working_oauth_secret
+            )
+        if not secrets:
+            raise QuotaError(
+                "未找到官方 OAuth 客户端凭据；请安装官方 Antigravity，"
+                "或设置 ANTIGRAVITY_OAUTH_CLIENT_SECRET。"
+            )
+        last_code: int | None = None
+        for secret in secrets:
+            form = urllib.parse.urlencode({
+                "client_id": self.config.get("oauthClientId", ""),
+                "client_secret": secret,
+                "refresh_token": token.get("refresh_token", ""),
+                "grant_type": "refresh_token",
+            }).encode("utf-8")
+            try:
+                value = self._request(OAUTH_URL, None, {}, deadline, form=form)
+            except _DeadlineExceeded:
+                raise
+            except _HttpQuotaError as exc:
+                last_code = exc.code
+                if exc.code in (400, 401):
+                    continue
+                raise QuotaError(f"Google OAuth 刷新失败（HTTP {exc.code}）。") from None
+            access = value.get("access_token")
+            if not access:
+                raise QuotaError("Google OAuth 响应中没有 access_token。")
+            self._working_oauth_secret = secret
+            token["access_token"] = access
+            token["expiry"] = (self.wall_clock() + timedelta(seconds=int(value.get("expires_in", 3600)))).isoformat()
+            if value.get("refresh_token"):
+                token["refresh_token"] = value["refresh_token"]
+            self.save_account(account)
+            return str(access)
+        raise QuotaError(f"Google OAuth 刷新失败（HTTP {last_code or 400}）。")
 
     def _entry(self, account_id: str) -> dict[str, Any]:
         value = self.cache.get(account_id)
@@ -451,6 +518,38 @@ def _http_message(code: int) -> str:
     if code == 429:
         return "Google 额度接口请求过于频繁（HTTP 429）。"
     return f"Google 接口返回 HTTP {code}。"
+
+
+def _language_server_candidates(executable: str) -> list[Path]:
+    """Locate the official ``language_server.exe`` holding the OAuth client."""
+    candidates: list[Path] = []
+    exe = Path(executable).expanduser() if executable.strip() else None
+    if exe is not None:
+        if exe.name.lower() == "language_server.exe":
+            candidates.append(exe)
+        else:
+            candidates.append(exe.parent / "resources" / "bin" / "language_server.exe")
+            candidates.append(exe.parent / "bin" / "language_server.exe")
+    for root_name in ("LOCALAPPDATA", "PROGRAMFILES"):
+        root = os.environ.get(root_name)
+        if not root:
+            continue
+        for name in ("antigravity", "Antigravity", "Antigravity IDE"):
+            candidates.append(Path(root) / "Programs" / name / "resources" / "bin" / "language_server.exe")
+            candidates.append(Path(root) / name / "resources" / "bin" / "language_server.exe")
+    seen: set[str] = set()
+    result: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                result.append(candidate)
+        except OSError:
+            continue
+    return result
 
 
 def run_quota_batch(
