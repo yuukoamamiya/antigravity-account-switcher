@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from cache_store import atomic_save_json
 from common import now_iso, parse_time, read_json, safe_text, sha256
-from config import resolve_path
+from config import resolve_path, save_oauth_client_secret
 from process_control import find_processes, terminate_process
 from quota_client import QuotaClient
 from runtime_control import AccountOperationLocks
@@ -141,8 +141,18 @@ class AccountCore:
         self._quota_route_cache: dict[str, Any] = {}
         self.quota_client = QuotaClient(
             config, self.user_agent, self.save_account, self._quota_route_cache,
+            save_client_secret=self._save_client_secret,
         )
         self.quota_client.log_route = lambda message: self.log(message, "WARN")
+
+    def _save_client_secret(self, secret: str) -> None:
+        """Persist a runtime-discovered OAuth client secret for later launches."""
+        self.config["oauthClientSecret"] = secret
+        try:
+            save_oauth_client_secret(secret)
+            self.log("已将 OAuth 客户端参数保存到本地配置。")
+        except Exception as exc:
+            self.log(f"无法保存 OAuth 客户端参数：{safe_text(exc)}", "WARN")
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.log_fn(safe_text(message), level)

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from config import ConfigError, OAUTH_CLIENT_ID, load_config, validate_config
+from config import ConfigError, OAUTH_CLIENT_ID, load_config, save_oauth_client_secret, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -16,6 +16,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["oauthClientSecret"], "simulated-environment-secret")
         self.assertEqual(config["quotaDeadlineSeconds"], 45)
         self.assertEqual(validate_config({}, environ={})["oauthClientSecret"], "")
+
+    def test_runtime_client_secret_is_saved_locally_and_preserves_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"proxy": "http://127.0.0.1:10809", "keep": 1}), encoding="utf-8")
+            client_value = "GOCSPX-" + "A" * 28
+            save_oauth_client_secret(client_value, path)
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["oauthClientSecret"], client_value)
+            self.assertEqual(stored["proxy"], "http://127.0.0.1:10809")
+            self.assertEqual(stored["keep"], 1)
+            with self.assertRaises(ConfigError):
+                save_oauth_client_secret("not-a-client-value", path)
 
     def test_file_parse_and_schema_errors_are_actionable(self):
         with tempfile.TemporaryDirectory() as directory:

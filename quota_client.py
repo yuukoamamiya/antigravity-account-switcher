@@ -94,6 +94,7 @@ class QuotaClient:
         opener_factory: Callable[[], urllib.request.OpenerDirector] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        save_client_secret: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.user_agent = user_agent
@@ -102,7 +103,9 @@ class QuotaClient:
         self.monotonic = monotonic
         self.wall_clock = wall_clock
         self.opener_factory = opener_factory or self._opener
+        self.save_client_secret = save_client_secret
         self._client_credentials: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._saved_oauth_secret: str | None = None
         self._working_oauth_secret: str | None = None
 
     def _opener(self) -> urllib.request.OpenerDirector:
@@ -202,6 +205,7 @@ class QuotaClient:
         expiry = _parse_time(token.get("expiry"))
         if token.get("access_token") and expiry and expiry > self.wall_clock() + timedelta(seconds=60):
             return str(token["access_token"])
+        explicit_secret = bool(str(self.config.get("oauthClientSecret") or "").strip())
         secrets = self._oauth_client_secrets()
         if self._working_oauth_secret:
             secrets = (self._working_oauth_secret,) + tuple(
@@ -233,6 +237,12 @@ class QuotaClient:
             if not access:
                 raise QuotaError("Google OAuth 响应中没有 access_token。")
             self._working_oauth_secret = secret
+            if not explicit_secret and self.save_client_secret is not None and secret != self._saved_oauth_secret:
+                self._saved_oauth_secret = secret
+                try:
+                    self.save_client_secret(secret)
+                except Exception:
+                    pass
             token["access_token"] = access
             token["expiry"] = (self.wall_clock() + timedelta(seconds=int(value.get("expires_in", 3600)))).isoformat()
             if value.get("refresh_token"):

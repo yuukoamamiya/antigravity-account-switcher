@@ -73,7 +73,7 @@ class QuotaClientTests(unittest.TestCase):
         self.now = 100.0
         self.wall = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def make_client(self, callback, *, cache=None, budget=10, config=None):
+    def make_client(self, callback, *, cache=None, budget=10, config=None, save_client_secret=None):
         opener = FakeOpener(callback)
         client = QuotaClient(
             {"quotaDeadlineSeconds": budget, "requestTimeoutSeconds": 20, **(config or {})},
@@ -81,6 +81,7 @@ class QuotaClientTests(unittest.TestCase):
             opener_factory=lambda: opener,
             monotonic=lambda: self.now,
             wall_clock=lambda: self.wall,
+            save_client_secret=save_client_secret,
         )
         return client, opener
 
@@ -281,6 +282,7 @@ class QuotaClientTests(unittest.TestCase):
         first_client_value = "GOCSPX-" + "A" * 28
         second_client_value = "GOCSPX-" + "B" * 28
         attempts = []
+        persisted = []
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -309,11 +311,12 @@ class QuotaClientTests(unittest.TestCase):
                 client, _ = self.make_client(callback, config={
                     "oauthClientId": first_id,
                     "antigravityExecutable": str(executable),
-                })
+                }, save_client_secret=persisted.append)
                 result = client.quota(account(expiry="2000-01-01T00:00:00+00:00"))
 
         self.assertTrue(result["success"])
         self.assertEqual(attempts, [first_client_value, second_client_value])
+        self.assertEqual(persisted, [second_client_value])
 
     def test_oauth_refresh_reports_missing_client_secret(self):
         import tempfile

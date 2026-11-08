@@ -122,6 +122,36 @@ def save_proxy_setting(value: str, path: str | os.PathLike[str] | None = None) -
     return proxy
 
 
+def save_oauth_client_secret(secret: str, path: str | os.PathLike[str] | None = None) -> None:
+    """Persist a runtime-discovered OAuth client secret into local config.
+
+    The value is read from the installed official client at runtime so the
+    repository never contains it; saving it locally avoids rescanning on every
+    launch. Existing fields and unknown keys are preserved.
+    """
+    if not isinstance(secret, str) or not secret.startswith("GOCSPX-") or len(secret) < 20:
+        raise ConfigError("OAuth 客户端参数无效，未保存。")
+    config_path = Path(path) if path is not None else active_config_path()
+    try:
+        source_path = config_path
+        if path is None and not config_path.exists():
+            source_path = next((candidate for candidate in config_candidates() if candidate.exists()), config_path)
+            config_path = source_path
+        if source_path.exists():
+            raw = json.loads(source_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ConfigError("配置文件内容必须是 JSON 对象，OAuth 客户端参数未保存。")
+            merged = raw
+        else:
+            merged = dict(DEFAULT_CONFIG)
+        merged["oauthClientSecret"] = secret
+        atomic_save_json(config_path, merged)
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ConfigError(f"无法保存 OAuth 客户端参数到配置文件：{exc}") from exc
+
+
 def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("配置内容必须是 JSON 对象。")
