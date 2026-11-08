@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.3
+
+- 恢复 daily → 生产 → sandbox 三级额度端点回退，修复额度无法正常读取的问题。
+- 使用官方 Antigravity Hub 2.28.0 指纹（含 Piper CL），并内置官方桌面客户端公开 OAuth 凭据用于刷新令牌。
+- 以 `fetchAvailableModels` 模型额度为主、`retrieveUserQuotaSummary` 分组额度为辅；403 时自动去掉 project 重试，401 才终止。
+- 窗口识别同时匹配 `window` 与 `bucketId`，并优先展示通用 Gemini 分组，避免混入 Argon/3P 分组。
+
 ## 0.1.2
 
 - 额度项目发现和额度查询仅使用 Google 生产接口，避免请求路由到 daily 或 sandbox 环境。

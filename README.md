@@ -4,7 +4,7 @@
 
 ## 下载与首次使用
 
-普通用户请从 GitHub Releases 下载 `AntigravityAccountSwitcherPortable-0.1.2-win10-x64-portable.zip`，解压后运行 `AntigravityAccountSwitcherPortable.exe`。便携版适用于 Windows x86-64；不提供 32 位或 ARM 构建。
+普通用户请从 GitHub Releases 下载 `AntigravityAccountSwitcherPortable-0.1.3-win10-x64-portable.zip`，解压后运行 `AntigravityAccountSwitcherPortable.exe`。便携版适用于 Windows x86-64；不提供 32 位或 ARM 构建。
 
 首次使用前，先安装并启动官方 Antigravity 应用，登录你要导入的账号，然后回到切换器点击“添加当前账号”。之后可在切换器设置本地代理端口（例如 `10809`）并刷新额度。代理用于额度查询，以及在账号凭据本身不含邮箱时向 Google userinfo 查询账号邮箱。
 
@@ -24,7 +24,7 @@ AntigravityAccountSwitcherPortable/
 
 配置和运行数据默认保存在 `Data/`：`Data/settings/account-switcher.config.json`、`Data/credentials/`、`Data/logs/account-switcher.log` 和 `Data/cache/quota-cache.json`。这些文件以明文保存在本机，不加密。请保护整个目录，不要分享或上传它，也不要将个人数据粘贴到问题、截图或日志中。已有 `local-data/` 私有配置仍可兼容读取；程序不会主动迁移或删除该目录。新电脑上需要先登录官方 Antigravity，再使用“添加当前账号”导入凭据。
 
-“便携”表示程序可从解压目录运行，不保证不写入系统位置：切换账号功能会读取和写入 Windows Credential Manager，这是功能所需行为。额度刷新使用 Google OAuth 和非公开额度接口，并保持 TLS 证书验证。接口或授权要求可能变化，因此不能保证新用户一定能成功刷新；发生 OAuth 刷新失败时，额度状态会显示错误。若需要自备 OAuth 参数，请仅提供你有权使用的值：`oauthClientSecret` 配置项或 `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 环境变量。发行包不携带个人 OAuth 参数。关闭额度查询可在配置中设置 `queryQuota` 为 `false`。
+“便携”表示程序可从解压目录运行，不保证不写入系统位置：切换账号功能会读取和写入 Windows Credential Manager，这是功能所需行为。额度刷新使用 Google OAuth 和非公开额度接口，并保持 TLS 证书验证。接口或授权要求可能变化，因此不能保证新用户一定能成功刷新；发生 OAuth 刷新失败时，额度状态会显示错误。程序内置官方 Antigravity 桌面客户端的公开 OAuth 客户端参数用于刷新令牌；如需覆盖，可设置 `oauthClientSecret` 配置项或 `ANTIGRAVITY_OAUTH_CLIENT_SECRET` 环境变量。关闭额度查询可在配置中设置 `queryQuota` 为 `false`。
 
 升级时先退出切换器，将新版压缩包解压到临时目录，然后用新版 `AntigravityAccountSwitcherPortable.exe`、`App/` 和 `Other/` 替换旧版本对应内容，保留原有 `Data/`。替换前建议关闭应用并备份 Data。不要用新包中的空 Data 覆盖已有数据。
 
@@ -42,7 +42,7 @@ python antigravity_account_switcher.py
 
 示例配置见 [`account-switcher.config.example.json`](account-switcher.config.example.json)。配置中的相对路径以便携根目录（即 EXE 所在目录）为基准；需要保存到 Data 的配置路径会明确包含 `Data/`。可在界面顶部选择“代理设置”，输入本地 HTTP 代理端口（例如 `10809`，会保存为 `http://127.0.0.1:10809`），留空则直连；也接受完整 HTTP 代理地址。查询进行时代理设置会暂时禁用。通过界面保存的设置在下一次额度刷新时生效；手动编辑配置文件中的 `proxy` 字段需要重启程序。
 
-启用 `queryQuota` 时，程序启动后会在后台查询额度；也可手动刷新。额度查询仅使用 Google 生产接口，不会回退到 daily 或 sandbox 接口。每个账号的查询预算为 45 秒，用于限制请求 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。查询失败时界面会显示状态。`--quota-only` 会发起真实网络请求，只在明确需要时手动运行。
+启用 `queryQuota` 时，程序启动后会在后台查询额度；也可手动刷新。额度查询依次尝试 daily、生产、sandbox 接口，与官方客户端一致；先读取模型额度作为主数据，再用分组额度摘要补充 5 小时与一周窗口。每个账号的查询预算为 45 秒，用于限制请求 socket timeout；DNS 解析或单次阻塞读取可能超过预算，因此不保证硬实时。查询失败时界面会显示状态。`--quota-only` 会发起真实网络请求，只在明确需要时手动运行。
 
 ## 隐私与安全
 
@@ -64,8 +64,8 @@ python -m pip install -r requirements-build.txt
 python packaging/build_portable.py
 ```
 
-该构建会在 `dist/` 生成便携 ZIP、源码 ZIP 和 SHA-256 清单；源码包名称为 `AntigravityAccountSwitcherPortable-0.1.2-source.zip`。普通源码运行仍支持 Python 3.10 或更新版本。
+该构建会在 `dist/` 生成便携 ZIP、源码 ZIP 和 SHA-256 清单；源码包名称为 `AntigravityAccountSwitcherPortable-0.1.3-source.zip`。普通源码运行仍支持 Python 3.10 或更新版本。
 
 本项目原创 Python 源码按 MIT License 发布，第三方运行时和依赖遵循各自许可证，详见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。仓库开发历史包含不随发布包分发的外部 Electron 应用参考片段；其来源许可尚未核实。上游产品参考、原创代码的 MIT 许可边界及历史参考文件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-GitHub Actions 的 `portable-release` workflow 可在 Fork 的默认分支通过 `workflow_dispatch` 手动打包，生成 `AntigravityAccountSwitcherPortable-0.1.2-win10-x64-portable.zip` 和 `AntigravityAccountSwitcherPortable-0.1.2-source.zip`。`ci.yml` 仅在 main 分支推送和 Pull Request 时运行测试。维护者推送与 `VERSION` 一致的 `v0.1.2` 标签后，`portable-release` 会构建并创建草稿 Release，最终由维护者人工发布。项目不提供自动更新，也没有代码签名；请从项目 GitHub Releases 获取发布包并核对发布说明。
+GitHub Actions 的 `portable-release` workflow 可在 Fork 的默认分支通过 `workflow_dispatch` 手动打包，生成 `AntigravityAccountSwitcherPortable-0.1.3-win10-x64-portable.zip` 和 `AntigravityAccountSwitcherPortable-0.1.3-source.zip`。`ci.yml` 仅在 main 分支推送和 Pull Request 时运行测试。维护者推送与 `VERSION` 一致的 `v0.1.3` 标签后，`portable-release` 会构建并创建草稿 Release，最终由维护者人工发布。项目不提供自动更新，也没有代码签名；请从项目 GitHub Releases 获取发布包并核对发布说明。

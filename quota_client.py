@@ -3,6 +3,18 @@
 This module deliberately depends only on the standard library.  The account
 switcher can use :class:`QuotaClient` as the implementation behind its public
 ``quota(account)`` method while keeping UI and credential management separate.
+
+The quota flow mirrors the official Antigravity client:
+
+* ``fetchAvailableModels`` is the primary source for the rolling five-hour
+  window (model ``quotaInfo``); ``retrieveUserQuotaSummary`` enriches it with
+  the grouped five-hour and weekly windows.
+* Requests walk the daily, production, and sandbox hosts in that order, because
+  the daily host is the one the official language server uses and the only host
+  observed to return every quota group.
+* A ``403`` sent with a project id is retried once without it on the same host;
+  only ``401`` stops the walk, so one host rejecting the request cannot hide
+  quota that another host still serves.
 """
 
 from __future__ import annotations
@@ -23,26 +35,49 @@ from typing import Any, Callable
 from common import parse_time as _parse_time, safe_text as _safe_text
 
 
+DAILY_HOST = "https://daily-cloudcode-pa.googleapis.com"
+PRODUCTION_HOST = "https://cloudcode-pa.googleapis.com"
+SANDBOX_HOST = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+
+# Daily is the host the official language server queries and the only one
+# observed to return every quota group. Production and sandbox remain bounded
+# fallbacks so a single unavailable deployment does not hide account quota.
 PROJECT_ENDPOINTS = (
-    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+    f"{DAILY_HOST}/v1internal:loadCodeAssist",
+    f"{PRODUCTION_HOST}/v1internal:loadCodeAssist",
+    f"{SANDBOX_HOST}/v1internal:loadCodeAssist",
+)
+MODELS_ENDPOINTS = (
+    f"{DAILY_HOST}/v1internal:fetchAvailableModels",
+    f"{PRODUCTION_HOST}/v1internal:fetchAvailableModels",
+    f"{SANDBOX_HOST}/v1internal:fetchAvailableModels",
 )
 QUOTA_ENDPOINTS = (
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    f"{DAILY_HOST}/v1internal:retrieveUserQuotaSummary",
+    f"{PRODUCTION_HOST}/v1internal:retrieveUserQuotaSummary",
+    f"{SANDBOX_HOST}/v1internal:retrieveUserQuotaSummary",
 )
 OAUTH_URL = "https://oauth2.googleapis.com/token"
 _CACHE_TTL_SECONDS = 6 * 60 * 60
+_FIVE_HOUR_PATTERN = re.compile(r"5\s*-?\s*h|5\s*hour|five.?hour|hourly")
+_WEEKLY_PATTERN = re.compile(r"week|weekly|7\s*-?\s*d|1\s*-?\s*w")
+_THIRD_PARTY_GROUP_TOKENS = ("argon", "claude", "gpt", "3p")
 
 
 class QuotaError(RuntimeError):
     """Safe-to-display quota request failure."""
 
 
+class _DeadlineExceeded(QuotaError):
+    """Raised when the shared quota budget is exhausted."""
+
+
 class QuotaClient:
     """Fetch quota with one monotonic deadline shared by OAuth and endpoints.
 
     ``cache`` is a mutable per-account mapping supplied by the caller.  Entries
-    contain only endpoint/project routing hints and expire after six hours.
-    The caller owns persistence of that mapping alongside its existing cache.
+    contain only project routing hints and expire after six hours.  The caller
+    owns persistence of that mapping alongside its existing cache.
     """
 
     def __init__(
@@ -84,9 +119,9 @@ class QuotaClient:
     def _request(self, url: str, token: str | None, body: dict[str, Any], deadline: float, *, form: bytes | None = None) -> dict[str, Any]:
         remaining = deadline - self.monotonic()
         if remaining <= 0:
-            raise QuotaError("额度查询已超过总耗时限制。")
+            raise _DeadlineExceeded("额度查询已超过总耗时限制。")
         request_timeout = max(0.001, min(float(self.config.get("requestTimeoutSeconds", 20)), remaining))
-        headers = {"User-Agent": self.user_agent}
+        headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
         if form is None:
             headers["Content-Type"] = "application/json"
             if token:
@@ -100,7 +135,7 @@ class QuotaClient:
             with self.opener_factory().open(request, timeout=request_timeout) as response:
                 value = json.loads(response.read().decode("utf-8"))
             if self.monotonic() >= deadline:
-                raise QuotaError("额度查询已超过总耗时限制。")
+                raise _DeadlineExceeded("额度查询已超过总耗时限制。")
             if not isinstance(value, dict):
                 raise QuotaError("Google 返回的数据格式不正确。")
             return value
@@ -150,13 +185,11 @@ class QuotaClient:
         except (TypeError, ValueError, OverflowError):
             self.cache.pop(account_id, None)
             return {}
-        # Older releases cached daily/sandbox routing for six hours. Never
-        # reuse a project id learned from those environments with production.
+        # Older releases cached routing hints learned from daily/sandbox
+        # environments. Only reuse project ids that match the current hosts.
         if value.get("projectEndpoint") not in PROJECT_ENDPOINTS:
             value.pop("projectEndpoint", None)
             value.pop("projectId", None)
-        if value.get("quotaEndpoint") not in QUOTA_ENDPOINTS:
-            value.pop("quotaEndpoint", None)
         if value:
             self.cache[account_id] = value
         else:
@@ -189,45 +222,172 @@ class QuotaClient:
             "displayName": str(raw.get("displayName") or ""),
             "description": str(raw.get("description") or ""),
             "window": str(raw.get("window") or ""),
+            "bucketId": str(raw.get("bucketId") or ""),
             "groupName": str(group.get("displayName") or ""),
         }
 
-    def _project(self, account_id: str, token: str, deadline: float) -> tuple[str | None, str | None]:
+    def _project(self, account_id: str, token: str, deadline: float) -> str | None:
         entry = self._entry(account_id)
         cached = entry.get("projectId")
         cached_endpoint = entry.get("projectEndpoint")
         if isinstance(cached, str) and cached:
-            return cached, cached_endpoint if cached_endpoint in PROJECT_ENDPOINTS else None
+            return cached
         endpoints = ([cached_endpoint] if cached_endpoint in PROJECT_ENDPOINTS else []) + [e for e in PROJECT_ENDPOINTS if e != cached_endpoint]
         body = {"metadata": {"ideType": "ANTIGRAVITY"}}
+        last_error = "项目发现失败。"
         for endpoint in endpoints:
             try:
                 response = self._request(endpoint, token, body, deadline)
-                project = response.get("cloudaicompanionProject")
-                project_id = str(project) if project else (str(cached) if cached else None)
-                if project_id:
-                    self._store(account_id, projectId=project_id, projectEndpoint=endpoint)
-                return project_id, endpoint
+            except _DeadlineExceeded:
+                raise
             except _HttpQuotaError as exc:
-                if exc.code in (401, 403, 429):
-                    if exc.code in (401, 403):
-                        self._invalidate(account_id, "projectId", "projectEndpoint", "quotaEndpoint")
+                if exc.code == 401:
                     raise QuotaError(_http_message(exc.code)) from None
-                if exc.code < 500 and exc.code != 404:
-                    break
+                last_error = _http_message(exc.code)
+                continue
             except QuotaError as exc:
-                if "总耗时限制" in str(exc):
-                    raise
-        return (str(cached) if cached else None), None
+                last_error = str(exc)
+                continue
+            project = response.get("cloudaicompanionProject")
+            if project:
+                project_id = str(project)
+                self._store(account_id, projectId=project_id, projectEndpoint=endpoint)
+                return project_id
+            return None
+        # Project discovery is optional: the quota endpoints accept an empty body.
+        self.log_route(last_error)
+        return None
 
-    def _invalidate(self, account_id: str, *keys: str) -> None:
-        entry = self._entry(account_id)
-        for key in keys:
-            entry.pop(key, None)
-        if entry:
-            self.cache[account_id] = entry
-        else:
-            self.cache.pop(account_id, None)
+    def log_route(self, _message: str) -> None:
+        """Hook for callers that want to surface non-fatal routing failures."""
+
+    def _parse_models(self, models: Any) -> dict[str, Any] | None:
+        if not isinstance(models, dict):
+            return None
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for name, info in models.items():
+            if not isinstance(info, dict):
+                continue
+            quota = info.get("quotaInfo")
+            if not isinstance(quota, dict):
+                continue
+            bucket = self._bucket(
+                {
+                    "remainingFraction": quota.get("remainingFraction"),
+                    "resetTime": quota.get("resetTime"),
+                    "displayName": str(name),
+                    "window": "5h",
+                },
+                {"displayName": "models"},
+            )
+            if bucket is not None:
+                candidates.append((str(name).lower(), bucket))
+        if not candidates:
+            return None
+        gemini = [pair for pair in candidates if "gemini" in pair[0]]
+        pool = gemini or candidates
+        return min(pool, key=lambda pair: pair[1]["remainingFraction"])[1]
+
+    def _models(self, token: str, project: str | None, deadline: float) -> dict[str, Any] | None:
+        body = {"project": project} if project else {}
+        last_error = "模型额度接口未返回可识别数据。"
+        for endpoint in MODELS_ENDPOINTS:
+            payload = dict(body)
+            retried_without_project = False
+            while True:
+                try:
+                    response = self._request(endpoint, token, payload, deadline)
+                except _DeadlineExceeded:
+                    raise
+                except _HttpQuotaError as exc:
+                    if exc.code == 401:
+                        raise QuotaError(_http_message(exc.code)) from None
+                    if exc.code == 403 and "project" in payload and not retried_without_project:
+                        payload = {}
+                        retried_without_project = True
+                        continue
+                    last_error = _http_message(exc.code)
+                    break
+                except QuotaError as exc:
+                    last_error = str(exc)
+                    break
+                bucket = self._parse_models(response.get("models"))
+                if bucket is not None:
+                    return bucket
+                last_error = "模型额度接口返回了空数据。"
+                break
+        self.log_route(last_error)
+        return None
+
+    @staticmethod
+    def _bucket_matches(bucket: dict[str, Any], kind: str) -> bool:
+        text = " ".join(
+            str(bucket.get(key) or "")
+            for key in ("window", "bucketId", "displayName")
+        ).lower()
+        return bool((_FIVE_HOUR_PATTERN if kind == "five" else _WEEKLY_PATTERN).search(text))
+
+    @staticmethod
+    def _is_general_group(bucket: dict[str, Any]) -> bool:
+        text = " ".join(str(bucket.get(key) or "") for key in ("groupName", "description")).lower()
+        return not any(token in text for token in _THIRD_PARTY_GROUP_TOKENS)
+
+    def _select_buckets(self, groups: list[Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        buckets: list[dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for raw in group.get("buckets") or []:
+                if not isinstance(raw, dict):
+                    continue
+                bucket = self._bucket(raw, group)
+                if bucket is not None:
+                    buckets.append(bucket)
+        general = [bucket for bucket in buckets if self._is_general_group(bucket)]
+
+        def pick(kind: str) -> dict[str, Any] | None:
+            for pool in (general, buckets):
+                for bucket in pool:
+                    if self._bucket_matches(bucket, kind):
+                        return bucket
+            return None
+
+        return pick("five"), pick("week")
+
+    def _summary(self, token: str, project: str | None, deadline: float) -> tuple[dict[str, Any] | None, dict[str, Any] | None] | None:
+        body = {"project": project} if project else {}
+        last_error = "额度摘要接口未返回可识别数据。"
+        for endpoint in QUOTA_ENDPOINTS:
+            payload = dict(body)
+            retried_without_project = False
+            while True:
+                try:
+                    response = self._request(endpoint, token, payload, deadline)
+                except _DeadlineExceeded:
+                    raise
+                except _HttpQuotaError as exc:
+                    if exc.code == 401:
+                        raise QuotaError(_http_message(exc.code)) from None
+                    if exc.code == 403 and "project" in payload and not retried_without_project:
+                        payload = {}
+                        retried_without_project = True
+                        continue
+                    last_error = _http_message(exc.code)
+                    break
+                except QuotaError as exc:
+                    last_error = str(exc)
+                    break
+                groups = response.get("groups")
+                if not isinstance(groups, list) or not groups:
+                    last_error = "Google 返回的额度分组为空。"
+                    break
+                five, weekly = self._select_buckets(groups)
+                if five is None and weekly is None:
+                    last_error = "Google 返回了额度数据，但未识别出 5 小时或一周窗口。"
+                    break
+                return five, weekly
+        self.log_route(last_error)
+        return None
 
     def quota(self, account: Any) -> dict[str, Any]:
         result = {"id": account.account_id, "success": False, "fiveHour": None, "weekly": None, "error": None,
@@ -237,56 +397,41 @@ class QuotaClient:
             budget = max(1.0, float(self.config.get("quotaDeadlineSeconds", 45)))
             deadline = self.monotonic() + budget
             token = self._refresh_token(account, deadline)
-            project, _project_endpoint = self._project(account_id, token, deadline)
-            entry = self._entry(account_id)
-            cached_endpoint = entry.get("quotaEndpoint")
-            endpoints = ([cached_endpoint] if cached_endpoint in QUOTA_ENDPOINTS else []) + [e for e in QUOTA_ENDPOINTS if e != cached_endpoint]
-            body = {"project": project} if project else {}
-            last_error = "额度接口未返回可识别数据。"
-            for endpoint in endpoints:
-                if deadline <= self.monotonic():
-                    raise QuotaError("额度查询已超过总耗时限制。")
+            project = self._project(account_id, token, deadline)
+
+            five: dict[str, Any] | None = None
+            weekly: dict[str, Any] | None = None
+            errors: list[str] = []
+            deadline_error: str | None = None
+
+            try:
+                five = self._models(token, project, deadline)
+            except _DeadlineExceeded:
+                deadline_error = "额度查询已超过总耗时限制。"
+            except QuotaError as exc:
+                errors.append(str(exc))
+
+            if deadline_error is None:
                 try:
-                    response = self._request(endpoint, token, body, deadline)
-                    groups = response.get("groups")
-                    if not isinstance(groups, list) or not groups:
-                        raise QuotaError("Google 返回的额度分组为空。")
-                    five = weekly = None
-                    for group in groups:
-                        if not isinstance(group, dict):
-                            continue
-                        for raw in group.get("buckets") or []:
-                            if not isinstance(raw, dict):
-                                continue
-                            bucket = self._bucket(raw, group)
-                            if bucket is None:
-                                continue
-                            primary = " ".join(str(bucket.get(k) or "") for k in ("window", "displayName")).lower()
-                            fallback = " ".join(str(bucket.get(k) or "") for k in ("description", "groupName")).lower()
-                            label = primary or fallback
-                            if re.search(r"5\s*-?\s*h|5\s*hour|five.?hour|hourly", label) and five is None:
-                                five = bucket
-                            elif re.search(r"week|weekly|7\s*-?\s*d|1\s*-?\s*w", label) and weekly is None:
-                                weekly = bucket
-                    if five is None and weekly is None:
-                        raise QuotaError("Google 返回了额度数据，但未识别出 5 小时或一周窗口。")
-                    self._store(account_id, quotaEndpoint=endpoint)
-                    result.update(success=True, fiveHour=five, weekly=weekly)
-                    return result
-                except _HttpQuotaError as exc:
-                    if exc.code in (401, 403):
-                        self._invalidate(account_id, "quotaEndpoint", "projectId", "projectEndpoint")
-                        raise QuotaError(_http_message(exc.code)) from None
-                    if exc.code == 429:
-                        raise QuotaError(_http_message(exc.code)) from None
-                    if exc.code < 500 and exc.code != 404:
-                        raise QuotaError(_http_message(exc.code)) from None
-                    last_error = _http_message(exc.code)
+                    summary = self._summary(token, project, deadline)
+                except _DeadlineExceeded:
+                    deadline_error = "额度查询已超过总耗时限制。"
                 except QuotaError as exc:
-                    last_error = str(exc)
-                    if "总耗时限制" in last_error:
-                        raise
-            raise QuotaError(last_error)
+                    errors.append(str(exc))
+                else:
+                    if summary is not None:
+                        summary_five, summary_weekly = summary
+                        five = summary_five or five
+                        weekly = summary_weekly
+
+            if five is None and weekly is None:
+                if deadline_error is not None:
+                    raise QuotaError(deadline_error)
+                if errors:
+                    raise QuotaError(errors[0])
+                raise QuotaError("额度接口未返回可识别数据。")
+            result.update(success=True, fiveHour=five, weekly=weekly)
+            return result
         except Exception as exc:
             result["error"] = _safe_text(exc) or "额度查询失败。"
             return result

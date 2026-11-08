@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import unittest
+import urllib.parse
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -11,7 +12,14 @@ from urllib.request import Request
 
 from unittest.mock import patch
 
-from quota_client import PROJECT_ENDPOINTS, QUOTA_ENDPOINTS, QuotaClient, _ExplicitProxyHandler, run_quota_batch
+from quota_client import (
+    MODELS_ENDPOINTS,
+    PROJECT_ENDPOINTS,
+    QUOTA_ENDPOINTS,
+    QuotaClient,
+    _ExplicitProxyHandler,
+    run_quota_batch,
+)
 
 
 class Response:
@@ -38,19 +46,26 @@ class FakeOpener:
         return self.callback(request, timeout)
 
 
-def account():
+def account(expiry="2099-01-01T00:00:00+00:00"):
     return SimpleNamespace(account_id="acct", payload={"token": {
         "access_token": "simulated-access-token",
         "refresh_token": "simulated-refresh-token",
-        "expiry": "2099-01-01T00:00:00+00:00",
+        "expiry": expiry,
     }})
 
 
 def quota_response():
-    return {"groups": [{"displayName": "limits", "buckets": [
-        {"remainingFraction": 0.5, "window": "5h"},
-        {"remainingFraction": 0.8, "window": "weekly"},
+    return {"groups": [{"displayName": "Gemini Models", "buckets": [
+        {"remainingFraction": 0.5, "window": "5h", "bucketId": "gemini-5h"},
+        {"remainingFraction": 0.8, "window": "weekly", "bucketId": "gemini-weekly"},
     ]}]}
+
+
+def models_response():
+    return {"models": {
+        "gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.7, "resetTime": "2026-01-01T05:00:00Z"}},
+        "claude-sonnet-4-5": {"quotaInfo": {"remainingFraction": 0.2}},
+    }}
 
 
 class QuotaClientTests(unittest.TestCase):
@@ -69,9 +84,220 @@ class QuotaClientTests(unittest.TestCase):
         )
         return client, opener
 
+    def test_endpoints_prefer_daily_then_production_then_sandbox(self):
+        for endpoints in (PROJECT_ENDPOINTS, MODELS_ENDPOINTS, QUOTA_ENDPOINTS):
+            self.assertEqual(len(endpoints), 3)
+            self.assertTrue(endpoints[0].startswith("https://daily-cloudcode-pa.googleapis.com/"))
+            self.assertTrue(endpoints[1].startswith("https://cloudcode-pa.googleapis.com/"))
+            self.assertTrue(endpoints[2].startswith("https://daily-cloudcode-pa.sandbox.googleapis.com/"))
+
+    def test_models_then_summary_are_queried_after_project(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                self.assertEqual(json.loads(request.data), {"project": "project-1"})
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                self.assertEqual(json.loads(request.data), {"project": "project-1"})
+                return Response(quota_response())
+            self.fail(f"unexpected endpoint: {request.full_url}")
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.5)
+        self.assertEqual(result["weekly"]["remainingFraction"], 0.8)
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            [PROJECT_ENDPOINTS[0], MODELS_ENDPOINTS[0], QUOTA_ENDPOINTS[0]],
+        )
+
+    def test_summary_retries_without_project_after_403_on_same_host(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                if json.loads(request.data).get("project"):
+                    raise HTTPError(request.full_url, 403, "forbidden", {}, io.BytesIO())
+                return Response(quota_response())
+            self.fail(f"unexpected endpoint: {request.full_url}")
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        summary_calls = [call for call in opener.calls if call[0] == QUOTA_ENDPOINTS[0]]
+        self.assertEqual(len(summary_calls), 2)
+        self.assertEqual(json.loads(summary_calls[0][2].data), {"project": "project-1"})
+        self.assertEqual(json.loads(summary_calls[1][2].data), {})
+
+    def test_models_fall_back_to_next_host(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+            if request.full_url == MODELS_ENDPOINTS[1]:
+                return Response(models_response())
+            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.7)
+        self.assertIsNone(result["weekly"])
+        self.assertIn(MODELS_ENDPOINTS[1], [call[0] for call in opener.calls])
+
+    def test_models_are_used_when_summary_is_empty(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response({"groups": []})
+            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+
+        client, _ = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.7)
+        self.assertIsNone(result["weekly"])
+
+    def test_summary_prefers_general_group_over_argon_and_third_party(self):
+        groups = {"groups": [
+            {"displayName": "Gemini 4 Argon", "description": "Premium", "buckets": [
+                {"remainingFraction": 0.1, "window": "weekly", "bucketId": "gemini-argon-weekly"},
+            ]},
+            {"displayName": "Claude and GPT models", "description": "Shared", "buckets": [
+                {"remainingFraction": 0.2, "window": "5h", "bucketId": "3p-5h"},
+                {"remainingFraction": 0.3, "window": "weekly", "bucketId": "3p-weekly"},
+            ]},
+            {"displayName": "Gemini Models", "description": "Standard", "buckets": [
+                {"remainingFraction": 0.6, "window": "5h", "bucketId": "gemini-5h"},
+                {"remainingFraction": 0.9, "window": "weekly", "bucketId": "gemini-weekly"},
+            ]},
+        ]}
+
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response({"models": {}})
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response(groups)
+            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+
+        client, _ = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["fiveHour"]["groupName"], "Gemini Models")
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.6)
+        self.assertEqual(result["weekly"]["groupName"], "Gemini Models")
+        self.assertEqual(result["weekly"]["remainingFraction"], 0.9)
+
+    def test_bucket_id_identifies_windows_when_window_is_empty(self):
+        groups = {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"remainingFraction": 0.4, "bucketId": "gemini-5h"},
+            {"remainingFraction": 0.9, "bucketId": "gemini-weekly"},
+        ]}]}
+
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url in MODELS_ENDPOINTS:
+                return Response({"models": {}})
+            return Response(groups)
+
+        client, _ = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.4)
+        self.assertEqual(result["weekly"]["remainingFraction"], 0.9)
+
+    def test_cached_project_is_used_first(self):
+        cache = {"acct": {
+            "projectId": "cached-project", "projectEndpoint": PROJECT_ENDPOINTS[0],
+            "expiresAt": self.wall.timestamp() + 100,
+        }}
+
+        def callback(request, _timeout):
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                self.assertEqual(json.loads(request.data), {"project": "cached-project"})
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response(quota_response())
+            self.fail(f"unexpected endpoint: {request.full_url}")
+
+        client, opener = self.make_client(callback, cache=cache)
+        self.assertTrue(client.quota(account())["success"])
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            [MODELS_ENDPOINTS[0], QUOTA_ENDPOINTS[0]],
+        )
+
+    def test_expired_project_cache_triggers_discovery(self):
+        cache = {"acct": {"projectId": "old", "projectEndpoint": PROJECT_ENDPOINTS[0],
+                          "expiresAt": self.wall.timestamp() - 1}}
+
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "new"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            return Response(quota_response())
+
+        client, opener = self.make_client(callback, cache=cache)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(cache["acct"]["projectId"], "new")
+        self.assertEqual(opener.calls[0][0], PROJECT_ENDPOINTS[0])
+
+    def test_oauth_refresh_sends_official_client_secret(self):
+        def callback(request, _timeout):
+            if request.full_url == "https://oauth2.googleapis.com/token":
+                form = urllib.parse.parse_qs(request.data.decode())
+                self.assertEqual(form["client_secret"], ["simulated-secret"])
+                self.assertEqual(form["grant_type"], ["refresh_token"])
+                return Response({"access_token": "fresh-access", "expires_in": 3600})
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            return Response({"groups": []})
+
+        client, _ = self.make_client(callback, config={"oauthClientSecret": "simulated-secret"})
+        result = client.quota(account(expiry="2000-01-01T00:00:00+00:00"))
+        self.assertTrue(result["success"])
+
+    def test_401_stops_all_further_requests(self):
+        def callback(request, _timeout):
+            raise HTTPError(request.full_url, 401, "failure", {}, io.BytesIO())
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual(len(opener.calls), 1)
+        self.assertIn("401", result["error"])
+
+    def test_429_and_5xx_walk_every_host(self):
+        def callback(request, _timeout):
+            raise HTTPError(request.full_url, 429 if request.full_url == MODELS_ENDPOINTS[0] else 500,
+                            "failure", {}, io.BytesIO())
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            list(PROJECT_ENDPOINTS) + list(MODELS_ENDPOINTS) + list(QUOTA_ENDPOINTS),
+        )
+
     def test_deadline_stops_after_project_discovery_and_bounds_timeout(self):
         def callback(request, timeout):
-            self.assertLessEqual(timeout, 10)
+            self.assertLessEqual(timeout, 5)
             self.now += 5
             raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
 
@@ -82,103 +308,20 @@ class QuotaClientTests(unittest.TestCase):
         self.assertLessEqual(opener.calls[0][1], 5)
         self.assertIn("总耗时限制", result["error"])
 
-    def test_shared_deadline_bounds_quota_request_after_project_discovery(self):
-        def callback(request, timeout):
+    def test_partial_success_survives_summary_deadline(self):
+        def callback(request, _timeout):
             if request.full_url == PROJECT_ENDPOINTS[0]:
-                self.now += 4
-                return Response({"cloudaicompanionProject": "production-project"})
-            self.assertEqual(request.full_url, QUOTA_ENDPOINTS[0])
-            self.assertLessEqual(timeout, 1)
-            self.now += 1
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            self.now += 10
             return Response(quota_response())
 
-        client, opener = self.make_client(callback, budget=5)
-        result = client.quota(account())
-        self.assertFalse(result["success"])
-        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
-        self.assertLessEqual(opener.calls[1][1], 1)
-        self.assertIn("总耗时限制", result["error"])
-
-    def test_cached_project_and_endpoint_are_used_first(self):
-        cached_endpoint = QUOTA_ENDPOINTS[0]
-        cached_project_endpoint = PROJECT_ENDPOINTS[0]
-        cache = {"acct": {
-            "projectId": "cached-project", "projectEndpoint": cached_project_endpoint,
-            "quotaEndpoint": cached_endpoint, "expiresAt": self.wall.timestamp() + 100,
-        }}
-
-        def callback(request, _timeout):
-            if request.full_url == cached_endpoint:
-                body = json.loads(request.data)
-                self.assertEqual(body["project"], "cached-project")
-                return Response(quota_response())
-            self.fail("unexpected endpoint")
-
-        client, opener = self.make_client(callback, cache=cache)
-        self.assertTrue(client.quota(account())["success"])
-        self.assertEqual([call[0] for call in opener.calls], [cached_endpoint])
-
-    def test_expired_cache_is_invalidated_and_production_routes_are_discovered(self):
-        cache = {"acct": {"projectId": "old", "quotaEndpoint": QUOTA_ENDPOINTS[0], "expiresAt": self.wall.timestamp() - 1}}
-
-        def callback(request, _timeout):
-            if request.full_url in PROJECT_ENDPOINTS:
-                return Response({"cloudaicompanionProject": "new"})
-            return Response(quota_response())
-
-        client, opener = self.make_client(callback, cache=cache)
+        client, _ = self.make_client(callback, budget=5)
         result = client.quota(account())
         self.assertTrue(result["success"])
-        self.assertEqual(cache["acct"]["projectId"], "new")
-        self.assertEqual(cache["acct"]["projectEndpoint"], PROJECT_ENDPOINTS[0])
-        self.assertEqual(cache["acct"]["quotaEndpoint"], QUOTA_ENDPOINTS[0])
-        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
-
-    def test_future_staging_hints_are_discarded_before_production_discovery(self):
-        cache = {"acct": {
-            "projectId": "staging-project",
-            "projectEndpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist",
-            "quotaEndpoint": "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-            "expiresAt": self.wall.timestamp() + 3600,
-        }}
-
-        def callback(request, _timeout):
-            if request.full_url == PROJECT_ENDPOINTS[0]:
-                return Response({"cloudaicompanionProject": "production-project"})
-            if request.full_url == QUOTA_ENDPOINTS[0]:
-                self.assertEqual(json.loads(request.data), {"project": "production-project"})
-                return Response(quota_response())
-            self.fail(f"unexpected endpoint: {request.full_url}")
-
-        client, opener = self.make_client(callback, cache=cache)
-        self.assertTrue(client.quota(account())["success"])
-        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
-        self.assertEqual(cache["acct"]["projectId"], "production-project")
-
-    def test_production_failures_do_not_fall_back_to_staging(self):
-        def callback(request, _timeout):
-            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
-
-        client, opener = self.make_client(callback)
-        result = client.quota(account())
-        self.assertFalse(result["success"])
-        self.assertEqual([call[0] for call in opener.calls], [PROJECT_ENDPOINTS[0], QUOTA_ENDPOINTS[0]])
-        self.assertTrue(all("daily-cloudcode-pa" not in call[0] and ".sandbox." not in call[0] for call in opener.calls))
-
-    def test_endpoint_constants_are_production_only(self):
-        self.assertEqual(PROJECT_ENDPOINTS, ("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",))
-        self.assertEqual(QUOTA_ENDPOINTS, ("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",))
-
-    def test_auth_and_rate_limit_fail_without_endpoint_walk(self):
-        for status in (401, 403, 429):
-            with self.subTest(status=status):
-                def callback(request, _timeout):
-                    raise HTTPError(request.full_url, status, "failure", {}, io.BytesIO())
-                client, opener = self.make_client(callback)
-                result = client.quota(account())
-                self.assertFalse(result["success"])
-                self.assertEqual(len(opener.calls), 1)
-                self.assertIn(str(status), result["error"])
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.7)
+        self.assertIsNone(result["weekly"])
 
     def test_proxy_bypass_is_explicit_and_suffix_safe(self):
         handler = _ExplicitProxyHandler({"https": "http://proxy.invalid:8080"}, ("localhost", "example.com"))

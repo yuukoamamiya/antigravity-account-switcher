@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from config import ConfigError, OAUTH_CLIENT_ID, load_config, validate_config
+from config import ConfigError, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, load_config, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -15,6 +15,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["oauthClientId"], OAUTH_CLIENT_ID)
         self.assertEqual(config["oauthClientSecret"], "simulated-environment-secret")
         self.assertEqual(config["quotaDeadlineSeconds"], 45)
+        self.assertEqual(validate_config({}, environ={})["oauthClientSecret"], OAUTH_CLIENT_SECRET)
 
     def test_file_parse_and_schema_errors_are_actionable(self):
         with tempfile.TemporaryDirectory() as directory:

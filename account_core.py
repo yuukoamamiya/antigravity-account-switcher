@@ -26,6 +26,12 @@ from quota_client import QuotaClient
 from runtime_control import AccountOperationLocks
 
 CREDENTIAL_TARGET = "gemini:antigravity"
+# Official Antigravity Hub identity verified to receive every quota-summary
+# group. Google withholds groups (and may reject requests) from older hub
+# versions, so the switcher always presents this baseline rather than probing a
+# possibly older local install. The version and Piper changelist are paired.
+HUB_CLIENT_VERSION = "2.28.0"
+HUB_CLIENT_CHANGELIST = "1008300195"
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -35,31 +41,13 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def antigravity_user_agent(executable: str) -> str:
-    """Identify quota requests as the installed Antigravity Hub client."""
-    version = "2.24.0"
-    try:
-        version_api = ctypes.WinDLL("version", use_last_error=True)
-        version_api.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
-        version_api.GetFileVersionInfoSizeW.restype = wintypes.DWORD
-        version_api.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
-        version_api.GetFileVersionInfoW.restype = wintypes.BOOL
-        version_api.VerQueryValueW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.UINT)]
-        version_api.VerQueryValueW.restype = wintypes.BOOL
-        ignored = wintypes.DWORD()
-        size = version_api.GetFileVersionInfoSizeW(executable, ctypes.byref(ignored))
-        if size:
-            data = ctypes.create_string_buffer(size)
-            if version_api.GetFileVersionInfoW(executable, 0, size, data):
-                info = wintypes.LPVOID()
-                info_size = wintypes.UINT()
-                if version_api.VerQueryValueW(data, "\\", ctypes.byref(info), ctypes.byref(info_size)) and info_size.value >= 16:
-                    words = ctypes.cast(info, ctypes.POINTER(wintypes.DWORD))
-                    version = f"{words[2] >> 16}.{words[2] & 0xffff}.{words[3] >> 16}"
-    except (OSError, AttributeError, TypeError, ValueError):
-        pass
+def antigravity_user_agent(_executable: str = "") -> str:
+    """Return the official Antigravity Hub User-Agent required upstream."""
     architecture = "arm64" if "arm" in platform.machine().lower() else "amd64"
-    return f"antigravity/hub/{version} (aidev_client; os_type=windows; arch={architecture})"
+    return (
+        f"antigravity/hub/{HUB_CLIENT_VERSION} "
+        f"(aidev_client; os_type=windows; arch={architecture}; cl={HUB_CLIENT_CHANGELIST})"
+    )
 
 
 @dataclass
@@ -154,6 +142,7 @@ class AccountCore:
         self.quota_client = QuotaClient(
             config, self.user_agent, self.save_account, self._quota_route_cache,
         )
+        self.quota_client.log_route = lambda message: self.log(message, "WARN")
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.log_fn(safe_text(message), level)
