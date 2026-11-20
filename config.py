@@ -22,6 +22,7 @@ OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleuse
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "credentialsDirectory": "Data/credentials",
+    "backupDirectory": "Data/backup",
     "antigravityExecutable": "Antigravity.exe",
     "proxy": "",
     "noProxy": "localhost,127.0.0.1",
@@ -36,7 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "oauthClientId": OAUTH_CLIENT_ID,
     "oauthClientSecret": "",
 }
-_STRING_FIELDS = ("credentialsDirectory", "antigravityExecutable", "proxy", "noProxy", "logFile", "quotaCacheFile", "oauthClientId", "oauthClientSecret")
+_STRING_FIELDS = ("credentialsDirectory", "backupDirectory", "antigravityExecutable", "proxy", "noProxy", "logFile", "quotaCacheFile", "oauthClientId", "oauthClientSecret")
 _POSITIVE_NUMBER_FIELDS = ("requestTimeoutSeconds", "quotaDeadlineSeconds", "closeTimeoutSeconds")
 
 
@@ -170,7 +171,7 @@ def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dic
     for field in _STRING_FIELDS:
         if not isinstance(result.get(field), str):
             raise ConfigError(f"配置项 {field} 必须是字符串。")
-    for field in ("credentialsDirectory", "antigravityExecutable", "logFile", "quotaCacheFile"):
+    for field in ("credentialsDirectory", "backupDirectory", "antigravityExecutable", "logFile", "quotaCacheFile"):
         if not result[field].strip():
             raise ConfigError(f"配置项 {field} 不能为空。")
     for field in _POSITIVE_NUMBER_FIELDS:

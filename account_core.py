@@ -5,16 +5,19 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wintypes
 import base64
+import errno
 import json
 import os
 import platform
 import re
+import shutil
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +29,7 @@ from quota_client import OAuthCredentialError, QuotaClient
 from runtime_control import AccountOperationLocks
 
 CREDENTIAL_TARGET = "gemini:antigravity"
+ERROR_NOT_SAME_DEVICE = 17
 # Official Antigravity Hub identity verified to receive every quota-summary
 # group. Google withholds groups (and may reject requests) from older hub
 # versions, so the switcher always presents this baseline rather than probing a
@@ -59,6 +63,7 @@ class Account:
     payload: dict[str, Any]
     data: bytes
     digest: str
+    order: int | None = None
 
 
 class CredentialFileTime(ctypes.Structure):
@@ -180,6 +185,7 @@ class AccountCore:
     def __init__(self, config: dict[str, Any], log_fn: Callable[[str, str], None] | None = None) -> None:
         self.config = config
         self.credentials_dir = resolve_path(str(config["credentialsDirectory"]))
+        self.backup_dir = resolve_path(str(config.get("backupDirectory", "Data/backup")))
         # The quota service can return availability placeholders when it sees
         # a third-party user agent instead of the native Antigravity client.
         self.user_agent = antigravity_user_agent(str(config.get("antigravityExecutable", "")))
@@ -212,7 +218,7 @@ class AccountCore:
         if not self.credentials_dir.exists():
             return []
         accounts: list[Account] = []
-        for path in sorted(self.credentials_dir.glob("account-*.json"), key=lambda p: p.name.lower()):
+        for path in self.credentials_dir.glob("account-*.json"):
             if path.name.endswith(".meta.json"):
                 continue
             match = re.fullmatch(r"account-(.+)\.json", path.name, re.IGNORECASE)
@@ -230,11 +236,15 @@ class AccountCore:
                         raise ValueError("缺少 token 字段")
                     meta_path = path.with_name(path.stem + ".meta.json")
                     email = ""
+                    order: int | None = None
                     if meta_path.exists():
                         try:
                             meta = read_json(meta_path)
                             if isinstance(meta, dict):
                                 email = str(meta.get("email") or "")
+                                stored_order = meta.get("order")
+                                if isinstance(stored_order, int) and not isinstance(stored_order, bool):
+                                    order = stored_order
                         except Exception:
                             pass
                     accounts.append(
@@ -246,10 +256,12 @@ class AccountCore:
                             payload=payload,
                             data=data,
                             digest=sha256(data),
+                            order=order,
                         )
                     )
             except Exception as exc:
                 self.log(f"跳过无效账号文件 {path.name}：{safe_text(exc)}", "WARN")
+        accounts.sort(key=lambda account: (account.order is None, account.order or 0, account.path.name.lower()))
         return accounts
 
     @staticmethod
@@ -318,6 +330,114 @@ class AccountCore:
                 pass
         meta["email"] = email
         atomic_save_json(account.meta_path, meta)
+
+    def rename_account(self, account: Account, display_name: str) -> Account:
+        """Change only the local display name stored in account metadata."""
+        if not isinstance(display_name, str):
+            raise ValueError("账号名称不能为空。")
+        name = display_name.strip()
+        if not name:
+            raise ValueError("账号名称不能为空。")
+        if len(name) > 254:
+            raise ValueError("账号名称不能超过 254 个字符。")
+        if any(ord(character) < 32 or ord(character) == 127 for character in name):
+            raise ValueError("账号名称不能包含控制字符。")
+        with self.operation_locks.hold(account.account_id):
+            self._save_email_metadata_locked(account, name)
+        self.log(f"账号 {account.account_id} 的显示名称已更新。")
+        return account
+
+    def set_account_order(self, ordered_ids: list[str]) -> int:
+        """Persist an explicit display order, validating every id before writing."""
+        if not isinstance(ordered_ids, list) or not ordered_ids:
+            raise ValueError("账号顺序无效。")
+        seen: set[str] = set()
+        for account_id in ordered_ids:
+            if (
+                not isinstance(account_id, str)
+                or not account_id
+                or account_id in seen
+                or any(marker in account_id for marker in ("/", "\\", "..", ":"))
+            ):
+                raise ValueError("账号顺序无效。")
+            seen.add(account_id)
+        for account_id in ordered_ids:
+            if not (self.credentials_dir / f"account-{account_id}.json").is_file():
+                raise ValueError(f"未知账号：{account_id}")
+        written = 0
+        for index, account_id in enumerate(ordered_ids):
+            meta_path = self.credentials_dir / f"account-{account_id}.meta.json"
+            with self.operation_locks.hold(account_id):
+                meta: dict[str, Any] = {}
+                if meta_path.exists():
+                    try:
+                        existing = read_json(meta_path)
+                        if isinstance(existing, dict):
+                            meta = existing
+                    except Exception:
+                        pass
+                meta["order"] = index
+                atomic_save_json(meta_path, meta)
+            written += 1
+        return written
+
+    @staticmethod
+    def _is_cross_device(error: OSError) -> bool:
+        if error.errno == errno.EXDEV:
+            return True
+        return os.name == "nt" and getattr(error, "winerror", None) == ERROR_NOT_SAME_DEVICE
+
+    @classmethod
+    def _move_file(cls, source: Path, destination: Path) -> None:
+        """Move a file, falling back to copy+unlink across volumes."""
+        try:
+            os.replace(source, destination)
+        except OSError as exc:
+            if not cls._is_cross_device(exc):
+                raise
+            shutil.copy2(source, destination)
+            os.unlink(source)
+
+    def delete_account(self, account: Account) -> Path:
+        """Move an account's credential files into the backup directory."""
+        current = self.credentials.read(CREDENTIAL_TARGET)
+        if current is not None:
+            matched = sha256(current) == account.digest
+            if not matched:
+                try:
+                    current_payload = json.loads(current.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError, ValueError):
+                    current_payload = None
+                current_refresh = (
+                    current_payload.get("token", {}).get("refresh_token")
+                    if isinstance(current_payload, dict) and isinstance(current_payload.get("token"), dict)
+                    else None
+                )
+                matched = bool(current_refresh) and current_refresh == account.payload.get("token", {}).get("refresh_token")
+            if matched:
+                raise RuntimeError("不能删除当前正在使用的账号，请先切换到其他账号。")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_dir = self.backup_dir / "credentials" / f"{stamp}-account-{account.account_id}"
+        sources = [account.path]
+        if account.meta_path.exists():
+            sources.append(account.meta_path)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            for source in sources:
+                destination = backup_dir / source.name
+                self._move_file(source, destination)
+                moved.append((source, destination))
+        except Exception as exc:
+            for source, destination in reversed(moved):
+                try:
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    self._move_file(destination, source)
+                except Exception as rollback_exc:
+                    self.log(f"恢复账号文件失败：{safe_text(rollback_exc)}", "WARN")
+            raise RuntimeError(f"删除账号失败：{safe_text(exc)}") from None
+        self.log(f"账号 {account.account_id} 的凭据已移动到备份目录。")
+        return backup_dir
 
     def add_current_account(self, display_name: str | None = None) -> tuple[Account, bool]:
         """Import the current Windows credential without replacing an existing account."""

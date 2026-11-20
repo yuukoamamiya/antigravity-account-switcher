@@ -75,6 +75,23 @@ class CompactCardLayoutTests(unittest.TestCase):
             self.assertLessEqual(app.canvas.objects[items["five_panel"]][3], y1)
             self.assertLessEqual(app.canvas.objects[items["weekly_panel"]][3], y1)
 
+            actions = []
+            for key in ("rename", "up", "down", "delete"):
+                button = app.canvas.objects[items[f"{key}_button"]]
+                actions.append(button)
+                self.assertGreaterEqual(button[0], x0)
+                self.assertLessEqual(button[2], x1)
+                self.assertGreaterEqual(button[1], y0)
+                self.assertLessEqual(button[3], y1)
+                self.assertEqual(button[3] - button[1], 26)
+            for previous, current in zip(actions, actions[1:]):
+                self.assertLessEqual(previous[2], current[0])
+                self.assertEqual(previous[1], current[1])
+                self.assertEqual(previous[3], current[3])
+            self.assertLessEqual(actions[-1][2], x1 - 12)
+            self.assertEqual(actions[0][3], y0 + 144)
+            self.assertLessEqual(actions[0][3], y1)
+
         for previous, current in zip(card_bounds, card_bounds[1:]):
             self.assertLessEqual(previous[3], current[1])
         self.assertEqual(card_bounds[-1][3] + 10, app.canvas.config["scrollregion"][3])

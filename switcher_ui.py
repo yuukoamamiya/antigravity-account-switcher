@@ -34,12 +34,15 @@ RDW_ALLCHILDREN = 0x0080
 
 # Canvas card geometry is kept together so redraws, scrolling, and resize
 # handling all use the same bounds.
-CARD_HEIGHT = 124
+CARD_HEIGHT = 152
 CARD_GAP = 10
 CARD_STEP = CARD_HEIGHT + CARD_GAP
 CARD_INSET_X = 2
 CARD_LEFT_WIDTH = 270
 CARD_BUTTON_WIDTH = 124
+CARD_ACTION_TOP = 118
+CARD_ACTION_HEIGHT = 26
+CARD_ACTION_GAP = 6
 
 
 class SwitcherApp:
@@ -256,6 +259,29 @@ class SwitcherApp:
             "account-refresh", account, button_x, y0 + 8, button_x + CARD_BUTTON_WIDTH, y0 + 36, "刷新额度",
         )
         self.canvas.tag_bind(refresh_tag, "<Button-1>", lambda _event, target=account: self.refresh_account(target))
+        action_right = x1 - 12
+        action_top = y0 + CARD_ACTION_TOP
+        action_bottom = action_top + CARD_ACTION_HEIGHT
+        actions = (
+            ("rename", "account-rename", 64, "重命名", self.rename_account),
+            ("up", "account-move-up", 40, "上移", lambda target: self.move_account(target, -1)),
+            ("down", "account-move-down", 40, "下移", lambda target: self.move_account(target, 1)),
+            ("delete", "account-delete", 56, "删除", self.delete_account),
+        )
+        action_x = action_right - (
+            sum(width for _key, _prefix, width, _text, _handler in actions)
+            + CARD_ACTION_GAP * (len(actions) - 1)
+        )
+        for key, prefix, button_width, text, handler in actions:
+            items[f"{key}_button"], items[f"{key}_button_text"] = self._card_button(
+                prefix, account, action_x, action_top, action_x + button_width, action_bottom, text,
+            )
+            self.canvas.tag_bind(
+                f"{prefix}:{account.account_id}",
+                "<Button-1>",
+                lambda _event, target=account, callback=handler: callback(target),
+            )
+            action_x += button_width + CARD_ACTION_GAP
         entry["items"] = items
 
     def _card_button(self, prefix: str, account: Account, x0: float, y0: float, x1: float, y1: float, text: str) -> tuple[int, int]:
@@ -626,6 +652,11 @@ class SwitcherApp:
             refresh_color = colors["panel"]
         self.canvas.itemconfigure(items["refresh_button"], fill=refresh_color)
         self.set_canvas_text_if_changed(items["refresh_button_text"], refresh_text)
+        busy = self._account_busy(entry["account"])
+        action_color = colors["muted"] if busy else colors["text"]
+        for key in ("rename_button_text", "up_button_text", "down_button_text"):
+            self.canvas.itemconfigure(items[key], fill=action_color)
+        self.canvas.itemconfigure(items["delete_button_text"], fill=colors["muted"] if busy else colors["warning"])
 
     def update_cards(self) -> None:
         for account in self.accounts:
@@ -653,6 +684,89 @@ class SwitcherApp:
                 self.events.put(("switch_error", safe_text(exc)))
 
         self.lifecycle.start("agy-switch", worker)
+
+    def _account_busy(self, account: Account) -> bool:
+        """Report whether an account-level action must wait for other work."""
+        return bool(
+            self.closing
+            or self.switching
+            or self.adding_current
+            or self.configuring_proxy
+            or self.quota_refreshing
+            or account.account_id in self.account_refreshing
+        )
+
+    def rename_account(self, account: Account) -> None:
+        """Change only the locally stored display name for an account."""
+        if self._account_busy(account):
+            return
+        value = simpledialog.askstring(
+            "重命名账号",
+            "输入新的显示名称（仅保存在本地元数据）",
+            initialvalue=account.email,
+            parent=self.root,
+        )
+        if value is None or self.closing or not value.strip():
+            return
+        try:
+            self.core.rename_account(account, value)
+        except ValueError as exc:
+            messagebox.showerror("重命名失败", str(exc), parent=self.root)
+            return
+        self.write_log(f"账号 {account.account_id} 已重命名为 {account.email}。")
+        self.redraw_cards()
+
+    def move_account(self, account: Account, offset: int) -> None:
+        """Move an account one slot up or down and persist the new order."""
+        if self._account_busy(account):
+            return
+        ordered_ids = [item.account_id for item in self.accounts]
+        try:
+            index = ordered_ids.index(account.account_id)
+        except ValueError:
+            return
+        target = index + offset
+        if target < 0 or target >= len(ordered_ids):
+            return
+        ordered_ids[index], ordered_ids[target] = ordered_ids[target], ordered_ids[index]
+        try:
+            self.core.set_account_order(ordered_ids)
+        except ValueError as exc:
+            messagebox.showerror("排序失败", str(exc), parent=self.root)
+            return
+        accounts_by_id = {item.account_id: item for item in self.accounts}
+        self.accounts[:] = [accounts_by_id[account_id] for account_id in ordered_ids]
+        self.write_log(f"账号 {account.account_id} 的顺序已更新。")
+        self.redraw_cards()
+
+    def delete_account(self, account: Account) -> None:
+        """Move an account's credential files into the backup directory."""
+        if self._account_busy(account):
+            return
+        confirmed = messagebox.askyesno(
+            "删除账号",
+            f"将把账号 {account.email} 的凭据文件移动到备份目录，不会立即擦除磁盘数据。继续吗？",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        try:
+            backup_dir = self.core.delete_account(account)
+        except (RuntimeError, ValueError) as exc:
+            messagebox.showerror("删除失败", str(exc), parent=self.root)
+            return
+        self.accounts[:] = [item for item in self.accounts if item.account_id != account.account_id]
+        self.cards.pop(account.account_id, None)
+        self.cache.pop(account.account_id, None)
+        self.account_refreshing.discard(account.account_id)
+        self.save_cache()
+        self.redraw_cards()
+        self.update_summary()
+        try:
+            location = str(backup_dir.relative_to(self.core.backup_dir))
+        except (AttributeError, ValueError):
+            location = str(backup_dir)
+        self.write_log(f"已删除账号 {account.account_id}，凭据已移动到备份目录：{location}")
 
     def add_current_account(self) -> None:
         if self.closing or self.switching or self.adding_current or self.configuring_proxy:

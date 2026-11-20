@@ -42,6 +42,15 @@ class ConfigTests(unittest.TestCase):
                 with self.subTest(contents=contents), self.assertRaisesRegex(ConfigError, expected):
                     load_config(path, environ={})
 
+    def test_backup_directory_defaults_and_must_not_be_empty(self):
+        self.assertEqual(validate_config({}, environ={})["backupDirectory"], "Data/backup")
+        self.assertEqual(validate_config({"backupDirectory": "Other/backup"}, environ={})["backupDirectory"], "Other/backup")
+        for value in ("", "   "):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "backupDirectory 不能为空"):
+                validate_config({"backupDirectory": value}, environ={})
+        with self.assertRaisesRegex(ConfigError, "backupDirectory 必须是字符串"):
+            validate_config({"backupDirectory": None}, environ={})
+
     def test_non_finite_and_unreasonably_large_timeout_values_are_rejected(self):
         for value in (math.nan, math.inf, -math.inf, 10**10000):
             with self.subTest(value_type=type(value).__name__), self.assertRaises(ConfigError):
