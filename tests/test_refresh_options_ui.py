@@ -94,6 +94,32 @@ class SingleAccountRefreshTests(unittest.TestCase):
         app.write_log.assert_not_called()
         app.update_card.assert_not_called()
 
+    def test_disabled_quota_queries_block_single_account_refresh(self):
+        app = make_app()
+        app.core.config["queryQuota"] = False
+        account = synthetic_account()
+
+        app.refresh_account(account)
+
+        self.assertIsNone(app.lifecycle.target)
+        app.core.quota.assert_not_called()
+        self.assertEqual(app.account_refreshing, set())
+        app.update_card.assert_not_called()
+        app.write_log.assert_not_called()
+
+    def test_enabled_quota_queries_allow_single_account_refresh(self):
+        app = make_app()
+        account = synthetic_account()
+        app.core.quota.return_value = {
+            "id": account.account_id, "success": True, "status": "ok", "attemptedAt": "2026-01-01T00:00:00Z",
+            "fiveHour": None, "weekly": None, "error": None,
+        }
+
+        app.refresh_account(account)
+
+        self.assertEqual(app.lifecycle.name, "agy-quota-single")
+        self.assertIn(account.account_id, app.account_refreshing)
+
     def test_refresh_runs_worker_and_emits_result_before_done(self):
         app = make_app()
         account = synthetic_account()

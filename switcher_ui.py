@@ -729,6 +729,8 @@ class SwitcherApp:
         """Query quota for a single account without touching the batch state."""
         if self.closing or self.quota_refreshing or self.configuring_proxy or self.adding_current:
             return
+        if not bool(self.core.config.get("queryQuota", True)):
+            return
         if account.account_id in self.account_refreshing:
             return
         self.account_refreshing.add(account.account_id)
