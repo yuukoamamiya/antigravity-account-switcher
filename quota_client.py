@@ -72,6 +72,10 @@ class QuotaError(RuntimeError):
     """Safe-to-display quota request failure."""
 
 
+class OAuthCredentialError(QuotaError):
+    """Google rejected the account's refresh token or OAuth client."""
+
+
 class _DeadlineExceeded(QuotaError):
     """Raised when the shared quota budget is exhausted."""
 
@@ -200,10 +204,13 @@ class QuotaClient:
             ordered.extend(secrets)
         return tuple(dict.fromkeys(ordered))
 
-    def _refresh_token(self, account: Any, deadline: float) -> str:
+    def ensure_access_token(self, account: Any, deadline: float | None = None, *, force: bool = False) -> str:
+        """Return a usable access token, refreshing it through OAuth when needed."""
+        if deadline is None:
+            deadline = self.monotonic() + max(1.0, float(self.config.get("requestTimeoutSeconds", 20)))
         token = account.payload["token"]
         expiry = _parse_time(token.get("expiry"))
-        if token.get("access_token") and expiry and expiry > self.wall_clock() + timedelta(seconds=60):
+        if not force and token.get("access_token") and expiry and expiry > self.wall_clock() + timedelta(seconds=60):
             return str(token["access_token"])
         explicit_secret = bool(str(self.config.get("oauthClientSecret") or "").strip())
         secrets = self._oauth_client_secrets()
@@ -249,7 +256,14 @@ class QuotaClient:
                 token["refresh_token"] = value["refresh_token"]
             self.save_account(account)
             return str(access)
-        raise QuotaError(f"Google OAuth 刷新失败（HTTP {last_code or 400}）。")
+        code = last_code or 400
+        if code in (400, 401):
+            raise OAuthCredentialError(f"Google OAuth 刷新失败（HTTP {code}），账号凭据可能已失效。")
+        raise QuotaError(f"Google OAuth 刷新失败（HTTP {code}）。")
+
+    def _refresh_token(self, account: Any, deadline: float) -> str:
+        """Backward-compatible wrapper around :meth:`ensure_access_token`."""
+        return self.ensure_access_token(account, deadline)
 
     def _entry(self, account_id: str) -> dict[str, Any]:
         value = self.cache.get(account_id)
@@ -473,7 +487,7 @@ class QuotaClient:
         try:
             budget = max(1.0, float(self.config.get("quotaDeadlineSeconds", 45)))
             deadline = self.monotonic() + budget
-            token = self._refresh_token(account, deadline)
+            token = self.ensure_access_token(account, deadline)
             project = self._project(account_id, token, deadline)
 
             five: dict[str, Any] | None = None

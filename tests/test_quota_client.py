@@ -16,7 +16,9 @@ from quota_client import (
     MODELS_ENDPOINTS,
     PROJECT_ENDPOINTS,
     QUOTA_ENDPOINTS,
+    OAuthCredentialError,
     QuotaClient,
+    QuotaError,
     _ExplicitProxyHandler,
     run_quota_batch,
 )
@@ -333,6 +335,52 @@ class QuotaClientTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("OAuth", result["error"])
+
+    def test_ensure_access_token_force_refreshes_unexpired_token(self):
+        calls = []
+
+        def callback(request, _timeout):
+            calls.append(request.full_url)
+            return Response({"access_token": "fresh-access", "expires_in": 3600})
+
+        client, _ = self.make_client(callback, config={"oauthClientSecret": "simulated-secret"})
+        cached = account()
+        self.assertEqual(client.ensure_access_token(cached), "simulated-access-token")
+        self.assertEqual(calls, [])
+        refreshed = account()
+        self.assertEqual(client.ensure_access_token(refreshed, force=True), "fresh-access")
+        self.assertEqual(calls, ["https://oauth2.googleapis.com/token"])
+        self.assertEqual(refreshed.payload["token"]["access_token"], "fresh-access")
+
+    def test_ensure_access_token_reports_rejected_credentials(self):
+        for code in (400, 401):
+            attempted = []
+
+            def callback(request, _timeout):
+                attempted.append(request.full_url)
+                raise HTTPError(request.full_url, code, "rejected", {}, io.BytesIO())
+
+            client, _ = self.make_client(callback, config={"oauthClientSecret": "simulated-secret"})
+            with self.subTest(code=code):
+                with self.assertRaises(OAuthCredentialError):
+                    client.ensure_access_token(account(expiry="2000-01-01T00:00:00+00:00"))
+                self.assertEqual(attempted, ["https://oauth2.googleapis.com/token"])
+
+    def test_ensure_access_token_requires_client_secret(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "Antigravity.exe"
+            with patch.dict(os.environ, {"LOCALAPPDATA": directory, "PROGRAMFILES": directory}):
+                client, _ = self.make_client(
+                    lambda *_: self.fail("no request should be sent"),
+                    config={"antigravityExecutable": str(executable)},
+                )
+                with self.assertRaises(QuotaError) as context:
+                    client.ensure_access_token(account(expiry="2000-01-01T00:00:00+00:00"))
+
+        self.assertNotIsInstance(context.exception, OAuthCredentialError)
 
     def test_401_stops_all_further_requests(self):
         def callback(request, _timeout):

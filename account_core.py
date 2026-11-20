@@ -22,7 +22,7 @@ from cache_store import atomic_save_json
 from common import now_iso, parse_time, read_json, safe_text, sha256
 from config import resolve_path, save_oauth_client_secret
 from process_control import find_processes, terminate_process
-from quota_client import QuotaClient
+from quota_client import OAuthCredentialError, QuotaClient
 from runtime_control import AccountOperationLocks
 
 CREDENTIAL_TARGET = "gemini:antigravity"
@@ -91,6 +91,8 @@ class CredentialManager:
         self.advapi.CredReadW.restype = wintypes.BOOL
         self.advapi.CredWriteW.argtypes = [ctypes.POINTER(CredentialRecord), wintypes.DWORD]
         self.advapi.CredWriteW.restype = wintypes.BOOL
+        self.advapi.CredDeleteW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        self.advapi.CredDeleteW.restype = wintypes.BOOL
         self.advapi.CredFree.argtypes = [wintypes.LPVOID]
         self.advapi.CredFree.restype = None
 
@@ -110,19 +112,68 @@ class CredentialManager:
         finally:
             self.advapi.CredFree(pointer)
 
-    def write(self, target: str, data: bytes) -> None:
+    def read_record(self, target: str) -> dict[str, Any] | None:
+        """Read a credential plus the metadata required to rewrite it exactly."""
+        pointer = wintypes.LPVOID()
+        if not self.advapi.CredReadW(target, 1, 0, ctypes.byref(pointer)):
+            error = ctypes.get_last_error()
+            if error == 1168:
+                return None
+            raise OSError(error, f"CredReadW failed ({error})")
+        try:
+            credential = ctypes.cast(pointer, ctypes.POINTER(CredentialRecord)).contents
+            size = int(credential.CredentialBlobSize)
+            blob = ctypes.string_at(credential.CredentialBlob, size) if size > 0 and credential.CredentialBlob else b""
+            return {
+                "flags": int(credential.Flags),
+                "type": int(credential.Type),
+                "comment": credential.Comment or None,
+                "persist": int(credential.Persist),
+                "user_name": credential.UserName or None,
+                "target_alias": credential.TargetAlias or None,
+                "blob": blob,
+            }
+        finally:
+            self.advapi.CredFree(pointer)
+
+    def write_record(
+        self,
+        target: str,
+        data: bytes,
+        *,
+        flags: int = 0,
+        comment: str = "Antigravity Account Switcher",
+        persist: int = 2,
+        user_name: str = "antigravity",
+        target_alias: str | None = None,
+    ) -> None:
+        """Write a generic credential using the supplied metadata."""
         buffer = ctypes.create_string_buffer(data) if data else None
         credential = CredentialRecord()
+        credential.Flags = flags
         credential.Type = 1
         credential.TargetName = target
-        credential.Comment = "Antigravity Account Switcher"
+        credential.Comment = comment
         credential.CredentialBlobSize = len(data)
         credential.CredentialBlob = ctypes.cast(buffer, wintypes.LPVOID) if buffer is not None else None
-        credential.Persist = 2
-        credential.UserName = "antigravity"
+        credential.Persist = persist
+        credential.TargetAlias = target_alias
+        credential.UserName = user_name
         if not self.advapi.CredWriteW(ctypes.byref(credential), 0):
             error = ctypes.get_last_error()
             raise OSError(error, f"CredWriteW failed ({error})")
+
+    def write(self, target: str, data: bytes) -> None:
+        self.write_record(target, data)
+
+    def remove(self, target: str) -> bool:
+        """Delete a credential, treating an already-missing target as success."""
+        if self.advapi.CredDeleteW(target, 1, 0):
+            return True
+        error = ctypes.get_last_error()
+        if error == 1168:
+            return True
+        raise OSError(error, f"CredDeleteW failed ({error})")
 
 
 class AccountCore:
@@ -453,14 +504,50 @@ class AccountCore:
     def switch(self, account: Account) -> None:
         with self.credential_switch_lock:
             with self.operation_locks.hold(account.account_id):
+                try:
+                    self.quota_client.ensure_access_token(account, force=True)
+                except OAuthCredentialError as exc:
+                    raise RuntimeError(f"账号凭据已失效，已取消切换：{safe_text(exc)}") from None
+                except Exception as exc:
+                    self.log(f"无法在切换前验证账号凭据，将直接写入本地凭据：{safe_text(exc)}", "WARN")
                 self.stop_antigravity()
                 if self.antigravity_running():
                     raise RuntimeError("Antigravity 仍在运行，已中止凭据写入。")
+                snapshot = self.credentials.read_record(CREDENTIAL_TARGET)
+                self.log("已备份当前 Windows 凭据以便回滚。")
                 self.log("确认 Antigravity 已退出，开始写入 Windows 凭据。")
-                self.credentials.write(CREDENTIAL_TARGET, account.data)
+                try:
+                    self.credentials.write(CREDENTIAL_TARGET, account.data)
+                    read_back = self.credentials.read(CREDENTIAL_TARGET)
+                    if read_back is None or sha256(read_back) != sha256(account.data):
+                        raise RuntimeError("凭据写入后的校验失败。")
+                except Exception:
+                    self._restore_credential_snapshot(snapshot)
+                    raise
+
+    def _restore_credential_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+        """Best-effort restore of the credential that preceded a failed write."""
+        try:
+            if snapshot is None:
+                self.credentials.remove(CREDENTIAL_TARGET)
                 read_back = self.credentials.read(CREDENTIAL_TARGET)
-                if read_back is None or sha256(read_back) != account.digest:
-                    raise RuntimeError("凭据写入后的校验失败。")
+                if read_back:
+                    raise RuntimeError("删除后仍能读到凭据。")
+                return
+            self.credentials.write_record(
+                CREDENTIAL_TARGET,
+                snapshot["blob"],
+                flags=snapshot["flags"],
+                comment=snapshot["comment"],
+                persist=snapshot["persist"],
+                user_name=snapshot["user_name"],
+                target_alias=snapshot["target_alias"],
+            )
+            read_back = self.credentials.read(CREDENTIAL_TARGET)
+            if read_back is None or sha256(read_back) != sha256(snapshot["blob"]):
+                raise RuntimeError("回读内容与备份不一致。")
+        except Exception as exc:
+            self.log(f"回滚原凭据失败：{safe_text(exc)}", "WARN")
 
     def quota(self, account: Account) -> dict[str, Any]:
         with self.operation_locks.hold(account.account_id):

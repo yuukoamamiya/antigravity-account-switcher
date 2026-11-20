@@ -18,9 +18,29 @@ class FakeCredentialManager:
     def read(self, _target):
         return self.value
 
+    def read_record(self, _target):
+        if self.value is None:
+            return None
+        return {
+            "flags": 0,
+            "type": 1,
+            "comment": "Antigravity Account Switcher",
+            "persist": 2,
+            "user_name": "antigravity",
+            "target_alias": None,
+            "blob": self.value,
+        }
+
     def write(self, _target, data):
         self.writes.append(data)
         self.value = data
+
+    def write_record(self, _target, data, **_metadata):
+        self.write(_target, data)
+
+    def remove(self, _target):
+        self.value = None
+        return True
 
 
 class AccountCoreTests(unittest.TestCase):
@@ -34,6 +54,7 @@ class AccountCoreTests(unittest.TestCase):
             fake_credentials = FakeCredentialManager()
             with patch("account_core.CredentialManager", return_value=fake_credentials):
                 core = AccountCore(config)
+            core.quota_client.ensure_access_token = lambda *_args, **_kwargs: "simulated-access-token"
             account = core.scan_accounts()[0]
             account.payload["token"]["access_token"] = "simulated-new"
             save_entered = threading.Event()
