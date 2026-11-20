@@ -28,6 +28,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "logFile": "Data/logs/account-switcher.log",
     "quotaCacheFile": "Data/cache/quota-cache.json",
     "queryQuota": True,
+    "refreshOnStartup": False,
     "requestTimeoutSeconds": 20,
     "quotaDeadlineSeconds": 45,
     "quotaMaxWorkers": 2,
@@ -93,28 +94,34 @@ def normalize_proxy_setting(value: str) -> str:
     return text
 
 
-def save_proxy_setting(value: str, path: str | os.PathLike[str] | None = None) -> str:
-    """Persist only the proxy field, merging against the current on-disk object.
+def _merge_and_save(updates: dict[str, Any], path: str | os.PathLike[str] | None, *, label: str = "配置") -> None:
+    """Merge field updates into the current on-disk config and write atomically.
 
     Environment-derived secrets are intentionally never used when constructing
-    the file. Existing file fields, including unknown fields, remain untouched.
+    the file. Existing fields, including unknown fields, remain untouched.
+    Read and write errors propagate so each caller can add its own context.
     """
-    proxy = normalize_proxy_setting(value)
     config_path = Path(path) if path is not None else active_config_path()
+    source_path = config_path
+    if path is None and not config_path.exists():
+        source_path = next((candidate for candidate in config_candidates() if candidate.exists()), config_path)
+        config_path = source_path
+    if source_path.exists():
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ConfigError(f"配置文件内容必须是 JSON 对象，{label}未保存。")
+        merged = raw
+    else:
+        merged = dict(DEFAULT_CONFIG)
+    merged.update(updates)
+    atomic_save_json(config_path, merged)
+
+
+def save_proxy_setting(value: str, path: str | os.PathLike[str] | None = None) -> str:
+    """Persist only the proxy field, merging against the current on-disk object."""
+    proxy = normalize_proxy_setting(value)
     try:
-        source_path = config_path
-        if path is None and not config_path.exists():
-            source_path = next((candidate for candidate in config_candidates() if candidate.exists()), config_path)
-            config_path = source_path
-        if source_path.exists():
-            raw = json.loads(source_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ConfigError("配置文件内容必须是 JSON 对象，代理设置未保存。")
-            merged = raw
-        else:
-            merged = dict(DEFAULT_CONFIG)
-        merged["proxy"] = proxy
-        atomic_save_json(config_path, merged)
+        _merge_and_save({"proxy": proxy}, path, label="代理设置")
     except ConfigError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -131,25 +138,28 @@ def save_oauth_client_secret(secret: str, path: str | os.PathLike[str] | None = 
     """
     if not isinstance(secret, str) or not secret.startswith("GOCSPX-") or len(secret) < 20:
         raise ConfigError("OAuth 客户端参数无效，未保存。")
-    config_path = Path(path) if path is not None else active_config_path()
     try:
-        source_path = config_path
-        if path is None and not config_path.exists():
-            source_path = next((candidate for candidate in config_candidates() if candidate.exists()), config_path)
-            config_path = source_path
-        if source_path.exists():
-            raw = json.loads(source_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ConfigError("配置文件内容必须是 JSON 对象，OAuth 客户端参数未保存。")
-            merged = raw
-        else:
-            merged = dict(DEFAULT_CONFIG)
-        merged["oauthClientSecret"] = secret
-        atomic_save_json(config_path, merged)
+        _merge_and_save({"oauthClientSecret": secret}, path, label="OAuth 客户端参数")
     except ConfigError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ConfigError(f"无法保存 OAuth 客户端参数到配置文件：{exc}") from exc
+
+
+def save_config_flag(field: str, value: bool, path: str | os.PathLike[str] | None = None) -> bool:
+    """Persist a boolean runtime flag, preserving all other on-disk fields."""
+    if field not in {"refreshOnStartup", "queryQuota"}:
+        raise ConfigError(f"不支持的配置项：{field}。")
+    if not isinstance(value, bool):
+        raise ConfigError(f"配置项 {field} 必须是 true 或 false。")
+    target_path = Path(path) if path is not None else active_config_path()
+    try:
+        _merge_and_save({field: value}, path)
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ConfigError(f"无法保存配置到 {target_path}：{exc}") from exc
+    return value
 
 
 def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dict[str, Any]:
@@ -176,6 +186,8 @@ def validate_config(value: Any, *, environ: dict[str, str] | None = None) -> dic
         raise ConfigError("配置项 quotaMaxWorkers 必须是 1 到 4 之间的整数。")
     if not isinstance(result.get("queryQuota"), bool):
         raise ConfigError("配置项 queryQuota 必须是 true 或 false。")
+    if not isinstance(result.get("refreshOnStartup"), bool):
+        raise ConfigError("配置项 refreshOnStartup 必须是 true 或 false。")
     if not result["oauthClientId"].strip():
         result["oauthClientId"] = OAUTH_CLIENT_ID
     env = os.environ if environ is None else environ

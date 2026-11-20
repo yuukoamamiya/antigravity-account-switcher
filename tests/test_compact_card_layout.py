@@ -49,6 +49,7 @@ class CompactCardLayoutTests(unittest.TestCase):
         app.accounts = [SimpleNamespace(account_id=f"synthetic-{i}", email=f"synthetic-{i}@example.invalid") for i in range(3)]
         app.cards = {account.account_id: {"account": account, "items": {}} for account in app.accounts}
         app.core = SimpleNamespace(credentials_dir=Path("synthetic"))
+        app.account_refreshing = set()
         app.card_fonts = {"email": object()}
         app.update_cards = lambda: None
         app.fit_card_text = lambda text, _font, width: text[: max(width // 8, 1)]
@@ -64,6 +65,13 @@ class CompactCardLayoutTests(unittest.TestCase):
             self.assertLessEqual(app.canvas.objects[items["updated"]][0] + items["updated_width"], button_x)
             self.assertLessEqual(app.canvas.objects[items["error"]][0] + items["error_width"], button_x)
             self.assertLessEqual(app.canvas.objects[items["button"]][2], x1)
+            refresh = app.canvas.objects[items["refresh_button"]]
+            switch = app.canvas.objects[items["button"]]
+            self.assertGreaterEqual(refresh[0], x0)
+            self.assertLessEqual(refresh[2], x1)
+            self.assertLessEqual(refresh[3], y1)
+            self.assertLessEqual(refresh[2], switch[2])
+            self.assertLessEqual(refresh[3], switch[1])
             self.assertLessEqual(app.canvas.objects[items["five_panel"]][3], y1)
             self.assertLessEqual(app.canvas.objects[items["weekly_panel"]][3], y1)
 

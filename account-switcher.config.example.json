@@ -6,6 +6,7 @@
   "logFile": "Data/logs/account-switcher.log",
   "quotaCacheFile": "Data/cache/quota-cache.json",
   "queryQuota": true,
+  "refreshOnStartup": false,
   "requestTimeoutSeconds": 20,
   "quotaDeadlineSeconds": 45,
   "quotaMaxWorkers": 2,

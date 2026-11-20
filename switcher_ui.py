@@ -18,8 +18,8 @@ from tkinter import simpledialog
 
 from account_core import Account, AccountCore, CREDENTIAL_TARGET
 from cache_store import atomic_save_json, validate_cache
-from common import parse_time, read_json, safe_text
-from config import ConfigError, normalize_proxy_setting, resolve_path, save_proxy_setting
+from common import now_iso, parse_time, read_json, safe_text
+from config import ConfigError, normalize_proxy_setting, resolve_path, save_config_flag, save_proxy_setting
 from quota_client import run_quota_batch
 from runtime_control import SingleInstance, WorkerLifecycle
 
@@ -54,6 +54,7 @@ class SwitcherApp:
         self.switching = False
         self.adding_current = False
         self.quota_refreshing = False
+        self.account_refreshing: set[str] = set()
         self.configuring_proxy = False
         self.quota_successes = 0
         self.quota_failures = 0
@@ -89,8 +90,13 @@ class SwitcherApp:
         self.write_log(f"已加载 {len(accounts)} 个账号。")
         self.root.after(150, self.poll_events)
         self.root.after(1000, self.tick)
-        if bool(core.config.get("queryQuota", True)) and accounts:
+        if self.should_refresh_on_startup(core.config, accounts):
             self.root.after(250, self.start_quota_refresh)
+
+    @staticmethod
+    def should_refresh_on_startup(config: dict[str, Any], accounts: list[Account]) -> bool:
+        """Refresh on launch only when quota queries and the startup flag allow it."""
+        return bool(config.get("queryQuota", True)) and bool(config.get("refreshOnStartup", False)) and bool(accounts)
 
     @staticmethod
     def system_dark() -> bool:
@@ -133,6 +139,9 @@ class SwitcherApp:
         self.add_account_button.grid(row=0, column=2, padx=(12, 0))
         self.proxy_settings_button = tk.Button(self.header, text="代理设置", command=self.configure_proxy, width=10, relief="flat", cursor="hand2", bd=0)
         self.proxy_settings_button.grid(row=0, column=4, padx=(8, 0))
+        self.startup_refresh_var = tk.BooleanVar(master=self.root, value=bool(core.config.get("refreshOnStartup", False)))
+        self.startup_refresh_check = tk.Checkbutton(self.header, text="启动时刷新", variable=self.startup_refresh_var, command=self.toggle_startup_refresh, relief="flat", cursor="hand2", bd=0)
+        self.startup_refresh_check.grid(row=0, column=5, padx=(8, 0))
 
         self.summary = tk.Frame(self.root, bg=colors["form"], height=58)
         self.summary.pack(fill="x", padx=24, pady=(0, 14))
@@ -242,7 +251,23 @@ class SwitcherApp:
         items["button"] = self.canvas.create_rectangle(button_x, y0 + 43, button_x + CARD_BUTTON_WIDTH, y0 + 79, fill=colors["accent"], outline="", tags=(button_tag,))
         items["button_text"] = self.canvas.create_text(button_x + CARD_BUTTON_WIDTH // 2, y0 + 61, anchor="center", text="切换到此账号", font=("Microsoft YaHei UI", 9), fill="white", tags=(button_tag,))
         self.canvas.tag_bind(button_tag, "<Button-1>", lambda _event, target=account: self.switch_account(target))
+        refresh_tag = f"account-refresh:{account.account_id}"
+        items["refresh_button"], items["refresh_button_text"] = self._card_button(
+            "account-refresh", account, button_x, y0 + 8, button_x + CARD_BUTTON_WIDTH, y0 + 36, "刷新额度",
+        )
+        self.canvas.tag_bind(refresh_tag, "<Button-1>", lambda _event, target=account: self.refresh_account(target))
         entry["items"] = items
+
+    def _card_button(self, prefix: str, account: Account, x0: float, y0: float, x1: float, y1: float, text: str) -> tuple[int, int]:
+        """Draw a flat card button and return its rectangle and text item ids."""
+        colors = self.colors
+        tag = f"{prefix}:{account.account_id}"
+        rectangle = self.canvas.create_rectangle(x0, y0, x1, y1, fill=colors["panel"], outline="", tags=(tag,))
+        label = self.canvas.create_text(
+            (x0 + x1) // 2, (y0 + y1) // 2, anchor="center", text=text,
+            font=("Microsoft YaHei UI", 9), fill=colors["text"], tags=(tag,),
+        )
+        return rectangle, label
 
     def apply_theme(self) -> None:
         self.colors = self.theme_colors()
@@ -260,12 +285,26 @@ class SwitcherApp:
         self.refresh_button.configure(bg=colors["accent"], fg="white", activebackground=colors["accent_hover"], activeforeground="white")
         self.add_account_button.configure(bg=colors["panel"], fg=colors["text"], activebackground=colors["border"], activeforeground=colors["text"])
         self.proxy_settings_button.configure(bg=colors["panel"], fg=colors["text"], activebackground=colors["border"], activeforeground=colors["text"])
+        self.startup_refresh_check.configure(bg=colors["form"], fg=colors["text"], activebackground=colors["form"], activeforeground=colors["text"], selectcolor=colors["panel"])
         for label, value_label in self.summary_labels:
             tile = label.master
             tile.configure(bg=colors["panel"])
             label.configure(bg=colors["panel"], fg=colors["muted"])
             value_label.configure(bg=colors["panel"], fg=colors["text"])
         self.redraw_cards()
+
+    def toggle_startup_refresh(self) -> None:
+        """Persist the startup refresh checkbox, rolling back on failure."""
+        previous = bool(self.core.config.get("refreshOnStartup", False))
+        value = bool(self.startup_refresh_var.get())
+        try:
+            value = save_config_flag("refreshOnStartup", value)
+        except ConfigError as exc:
+            self.startup_refresh_var.set(previous)
+            messagebox.showerror("设置未保存", str(exc), parent=self.root)
+            return
+        self.core.config["refreshOnStartup"] = value
+        self.write_log("启动时刷新已开启。" if value else "启动时刷新已关闭。")
 
     def install_native_drag_guard(self) -> None:
         """Freeze Tk child-window painting during native move/resize gestures."""
@@ -576,6 +615,17 @@ class SwitcherApp:
         self.canvas.itemconfigure(items["strip"], fill=button_color if current else colors["accent"])
         self.canvas.itemconfigure(items["button"], fill=button_color)
         self.canvas.itemconfigure(items["button_text"], text="当前账号" if current else "切换到此账号")
+        if account_id in self.account_refreshing:
+            refresh_text = "刷新中…"
+            refresh_color = colors["muted"]
+        elif self.quota_refreshing:
+            refresh_text = "刷新额度"
+            refresh_color = colors["muted"]
+        else:
+            refresh_text = "刷新额度"
+            refresh_color = colors["panel"]
+        self.canvas.itemconfigure(items["refresh_button"], fill=refresh_color)
+        self.set_canvas_text_if_changed(items["refresh_button_text"], refresh_text)
 
     def update_cards(self) -> None:
         for account in self.accounts:
@@ -586,6 +636,8 @@ class SwitcherApp:
         if self.closing or self.adding_current or self.configuring_proxy:
             return
         if self.switching or account.account_id == self.current_id:
+            return
+        if account.account_id in self.account_refreshing:
             return
         self.switching = True
         self.update_operation_buttons()
@@ -673,6 +725,36 @@ class SwitcherApp:
 
         self.lifecycle.start("agy-quota", worker)
 
+    def refresh_account(self, account: Account) -> None:
+        """Query quota for a single account without touching the batch state."""
+        if self.closing or self.quota_refreshing or self.configuring_proxy or self.adding_current:
+            return
+        if account.account_id in self.account_refreshing:
+            return
+        self.account_refreshing.add(account.account_id)
+        self.write_log(f"开始刷新账号 {account.account_id} 的额度。")
+        self.update_card(account.account_id)
+
+        def worker(_cancel: threading.Event) -> None:
+            try:
+                try:
+                    result = self.core.quota(account)
+                except Exception as exc:
+                    result = {
+                        "id": account.account_id,
+                        "success": False,
+                        "status": "unknown",
+                        "error": safe_text(exc),
+                        "attemptedAt": now_iso(),
+                        "fiveHour": None,
+                        "weekly": None,
+                    }
+                self.events.put(("quota_result", result))
+            finally:
+                self.events.put(("quota_single_done", account.account_id))
+
+        self.lifecycle.start("agy-quota-single", worker)
+
     def poll_events(self) -> None:
         if self.closing:
             return
@@ -722,6 +804,14 @@ class SwitcherApp:
                         item["error"] = result.get("error") or "未知错误"
                         self.write_log(f"账号 {result['id']} 的额度查询失败：{item['error']}", "WARN")
                     self.update_card(result["id"])
+                elif kind == "quota_single_done":
+                    account_id = value
+                    self.account_refreshing.discard(account_id)
+                    self.save_cache()
+                    self.update_card(account_id)
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    self.set_quota_status(f"已刷新账号 {account_id} · {stamp}")
+                    self.write_log(f"账号 {account_id} 的单账号额度刷新已完成。")
                 elif kind == "quota_done":
                     self.quota_refreshing = False
                     self.update_operation_buttons()

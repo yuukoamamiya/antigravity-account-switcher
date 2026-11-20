@@ -3,8 +3,10 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from config import ConfigError, OAUTH_CLIENT_ID, load_config, save_oauth_client_secret, validate_config
+import config
+from config import ConfigError, OAUTH_CLIENT_ID, load_config, save_config_flag, save_oauth_client_secret, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -44,6 +46,55 @@ class ConfigTests(unittest.TestCase):
         for value in (math.nan, math.inf, -math.inf, 10**10000):
             with self.subTest(value_type=type(value).__name__), self.assertRaises(ConfigError):
                 validate_config({"requestTimeoutSeconds": value}, environ={})
+
+    def test_refresh_on_startup_defaults_to_false_and_requires_bool(self):
+        self.assertIs(validate_config({}, environ={})["refreshOnStartup"], False)
+        for value in ("yes", 1, 0, None, []):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "refreshOnStartup"):
+                validate_config({"refreshOnStartup": value}, environ={})
+
+    def test_save_config_flag_writes_flag_and_preserves_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"proxy": "http://127.0.0.1:10809", "futureOption": {"enabled": True}}), encoding="utf-8")
+            self.assertIs(save_config_flag("refreshOnStartup", True, path), True)
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIs(stored["refreshOnStartup"], True)
+            self.assertEqual(stored["proxy"], "http://127.0.0.1:10809")
+            self.assertEqual(stored["futureOption"], {"enabled": True})
+            self.assertIs(load_config(path, environ={})["refreshOnStartup"], True)
+
+    def test_save_config_flag_rejects_unknown_fields_and_non_bool_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = {"keep": "unchanged"}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "不支持的配置项：proxy。"):
+                save_config_flag("proxy", True, path)
+            with self.assertRaisesRegex(ConfigError, "refreshOnStartup 必须是 true 或 false"):
+                save_config_flag("refreshOnStartup", "true", path)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    def test_save_config_flag_writes_only_active_config_path_in_temp_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "Data" / "settings" / "account-switcher.config.json"
+            legacy = root / "account-switcher.config.json"
+            with patch.object(config, "CONFIG_PATH", primary), \
+                 patch.object(config, "LOCAL_CONFIG_PATH", root / "local-data" / "account-switcher.config.json"), \
+                 patch.object(config, "LEGACY_CONFIG_PATH", legacy):
+                self.assertIs(config.save_config_flag("queryQuota", False), False)
+            self.assertTrue(primary.exists())
+            self.assertFalse(legacy.exists())
+            self.assertIs(json.loads(primary.read_text(encoding="utf-8"))["queryQuota"], False)
+
+    def test_save_config_flag_wraps_write_failure_with_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            with patch("config.atomic_save_json", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(ConfigError, "无法保存配置到") as raised:
+                    save_config_flag("refreshOnStartup", True, path)
+            self.assertIn(str(path), str(raised.exception))
 
     def test_non_finite_json_numbers_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -26,6 +26,7 @@ def make_app(proxy=""):
     app.switching = False
     app.adding_current = False
     app.quota_refreshing = False
+    app.account_refreshing = set()
     app.configuring_proxy = False
     app.accounts = []
     app.refresh_button = Mock()
@@ -117,13 +118,14 @@ class ProxySettingsUiTests(unittest.TestCase):
         app.update_operation_buttons()
         app.proxy_settings_button.configure.assert_called_with(state="disabled")
 
-        for name in ("root", "header", "summary", "body", "footer", "logo", "title_label", "quota_status", "canvas", "log_text", "log_title", "scrollbar", "refresh_button", "add_account_button", "proxy_settings_button"):
+        for name in ("root", "header", "summary", "body", "footer", "logo", "title_label", "quota_status", "canvas", "log_text", "log_title", "scrollbar", "refresh_button", "add_account_button", "proxy_settings_button", "startup_refresh_check"):
             setattr(app, name, Mock())
         app.summary_labels = []
         app.redraw_cards = Mock()
         app.dark = False
         app.apply_theme()
         app.proxy_settings_button.configure.assert_any_call(bg=app.colors["panel"], fg=app.colors["text"], activebackground=app.colors["border"], activeforeground=app.colors["text"])
+        app.startup_refresh_check.configure.assert_any_call(bg=app.colors["form"], fg=app.colors["text"], activebackground=app.colors["form"], activeforeground=app.colors["text"], selectcolor=app.colors["panel"])
 
 
 if __name__ == "__main__":
