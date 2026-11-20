@@ -7,7 +7,7 @@ import unittest
 import urllib.parse
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from unittest.mock import patch
@@ -75,11 +75,11 @@ class QuotaClientTests(unittest.TestCase):
         self.now = 100.0
         self.wall = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def make_client(self, callback, *, cache=None, budget=10, config=None, save_client_secret=None):
+    def make_client(self, callback, *, cache=None, budget=10, config=None, save_client_secret=None, save_account=None):
         opener = FakeOpener(callback)
         client = QuotaClient(
             {"quotaDeadlineSeconds": budget, "requestTimeoutSeconds": 20, **(config or {})},
-            "test-agent", lambda _account: None, cache,
+            "test-agent", save_account or (lambda _account: None), cache,
             opener_factory=lambda: opener,
             monotonic=lambda: self.now,
             wall_clock=lambda: self.wall,
@@ -382,15 +382,92 @@ class QuotaClientTests(unittest.TestCase):
 
         self.assertNotIsInstance(context.exception, OAuthCredentialError)
 
-    def test_401_stops_all_further_requests(self):
-        def callback(request, _timeout):
-            raise HTTPError(request.full_url, 401, "failure", {}, io.BytesIO())
+    def test_401_refreshes_token_and_retries_once(self):
+        saved = []
+        refreshed = []
 
-        client, opener = self.make_client(callback)
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == "https://oauth2.googleapis.com/token":
+                form = urllib.parse.parse_qs(request.data.decode())
+                self.assertEqual(form["refresh_token"], ["simulated-refresh-token"])
+                refreshed.append(form)
+                return Response({"access_token": "fresh-access", "expires_in": 3600})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                authorization = request.get_header("Authorization")
+                if authorization == "Bearer simulated-access-token":
+                    raise HTTPError(request.full_url, 401, "expired", {}, io.BytesIO())
+                self.assertEqual(authorization, "Bearer fresh-access")
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response(quota_response())
+            self.fail(f"unexpected endpoint: {request.full_url}")
+
+        client, opener = self.make_client(
+            callback,
+            config={"oauthClientSecret": "simulated-secret"},
+            save_account=saved.append,
+        )
+        current = account()
+        result = client.quota(current)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.5)
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(current.payload["token"]["access_token"], "fresh-access")
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            [
+                PROJECT_ENDPOINTS[0],
+                MODELS_ENDPOINTS[0],
+                "https://oauth2.googleapis.com/token",
+                MODELS_ENDPOINTS[0],
+                QUOTA_ENDPOINTS[0],
+            ],
+        )
+
+    def test_401_after_forced_refresh_is_not_retried_again(self):
+        attempts = []
+
+        def callback(request, _timeout):
+            attempts.append(request.full_url)
+            if request.full_url == "https://oauth2.googleapis.com/token":
+                return Response({"access_token": "fresh-access", "expires_in": 3600})
+            raise HTTPError(request.full_url, 401, "expired", {}, io.BytesIO())
+
+        client, _ = self.make_client(callback, config={"oauthClientSecret": "simulated-secret"})
         result = client.quota(account())
         self.assertFalse(result["success"])
-        self.assertEqual(len(opener.calls), 1)
-        self.assertIn("401", result["error"])
+        self.assertEqual(result["status"], "unauthorized")
+        self.assertEqual(
+            attempts,
+            [PROJECT_ENDPOINTS[0], "https://oauth2.googleapis.com/token", PROJECT_ENDPOINTS[0]],
+        )
+
+    def test_http_failures_are_classified(self):
+        for code, status in ((429, "rate_limited"), (403, "forbidden")):
+            with self.subTest(code=code):
+                def callback(request, _timeout, code=code):
+                    raise HTTPError(request.full_url, code, "failure", {}, io.BytesIO())
+
+                client, _ = self.make_client(callback)
+                result = client.quota(account())
+                self.assertFalse(result["success"])
+                self.assertEqual(result["status"], status)
+                self.assertIn(str(code), result["error"])
+
+    def test_network_failure_is_classified(self):
+        def callback(request, _timeout):
+            raise URLError("simulated network failure")
+
+        client, _ = self.make_client(callback)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "network")
+        self.assertIn("Google", result["error"])
 
     def test_429_and_5xx_walk_every_host(self):
         def callback(request, _timeout):
@@ -416,6 +493,7 @@ class QuotaClientTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(len(opener.calls), 1)
         self.assertLessEqual(opener.calls[0][1], 5)
+        self.assertEqual(result["status"], "deadline")
         self.assertIn("总耗时限制", result["error"])
 
     def test_partial_success_survives_summary_deadline(self):

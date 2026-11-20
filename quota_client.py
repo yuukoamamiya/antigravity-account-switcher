@@ -12,9 +12,11 @@ The quota flow mirrors the official Antigravity client:
 * Requests walk the daily, production, and sandbox hosts in that order, because
   the daily host is the one the official language server uses and the only host
   observed to return every quota group.
-* A ``403`` sent with a project id is retried once without it on the same host;
-  only ``401`` stops the walk, so one host rejecting the request cannot hide
-  quota that another host still serves.
+* A ``403`` sent with a project id is retried once without it on the same host,
+  so one host rejecting the request cannot hide quota that another host still
+  serves.
+* A ``401`` stops the walk and triggers one forced OAuth refresh before a single
+  retry. Other failures are classified into a status the caller can act on.
 """
 
 from __future__ import annotations
@@ -74,6 +76,23 @@ class QuotaError(RuntimeError):
 
 class OAuthCredentialError(QuotaError):
     """Google rejected the account's refresh token or OAuth client."""
+
+
+class AuthorizationExpired(QuotaError):
+    """The upstream rejected the access token, so it must be refreshed."""
+
+
+class _NetworkQuotaError(QuotaError):
+    """The request failed at the socket layer."""
+
+
+class QuotaStatusError(QuotaError):
+    """A classified non-authorization quota failure."""
+
+    def __init__(self, status: str, message: str, code: int | None = None) -> None:
+        self.status = status
+        self.code = code
+        super().__init__(message)
 
 
 class _DeadlineExceeded(QuotaError):
@@ -156,9 +175,9 @@ class QuotaClient:
             exc.close()
             raise _HttpQuotaError(exc.code) from None
         except urllib.error.URLError as exc:
-            raise QuotaError(f"Google 接口请求失败：{_safe_text(exc.reason)}") from None
+            raise _NetworkQuotaError(f"Google 接口请求失败：{_safe_text(exc.reason)}") from None
         except (TimeoutError, OSError):
-            raise QuotaError("Google 接口请求超时或失败。") from None
+            raise _NetworkQuotaError("Google 接口请求超时或失败。") from None
         except json.JSONDecodeError:
             raise QuotaError("Google 接口返回的数据无法解析。") from None
 
@@ -331,9 +350,11 @@ class QuotaClient:
                 response = self._request(endpoint, token, body, deadline)
             except _DeadlineExceeded:
                 raise
+            except _NetworkQuotaError:
+                raise
             except _HttpQuotaError as exc:
                 if exc.code == 401:
-                    raise QuotaError(_http_message(exc.code)) from None
+                    raise AuthorizationExpired(_http_message(exc.code)) from None
                 last_error = _http_message(exc.code)
                 continue
             except QuotaError as exc:
@@ -381,6 +402,8 @@ class QuotaClient:
 
     def _models(self, token: str, project: str | None, deadline: float) -> dict[str, Any] | None:
         body = {"project": project} if project else {}
+        status = "unknown"
+        code: int | None = None
         last_error = "模型额度接口未返回可识别数据。"
         for endpoint in MODELS_ENDPOINTS:
             payload = dict(body)
@@ -390,25 +413,30 @@ class QuotaClient:
                     response = self._request(endpoint, token, payload, deadline)
                 except _DeadlineExceeded:
                     raise
+                except _NetworkQuotaError:
+                    raise
                 except _HttpQuotaError as exc:
                     if exc.code == 401:
-                        raise QuotaError(_http_message(exc.code)) from None
+                        raise AuthorizationExpired(_http_message(exc.code)) from None
                     if exc.code == 403 and "project" in payload and not retried_without_project:
                         payload = {}
                         retried_without_project = True
                         continue
+                    status, code = _http_status(exc.code), exc.code
                     last_error = _http_message(exc.code)
                     break
                 except QuotaError as exc:
+                    status, code = "unknown", None
                     last_error = str(exc)
                     break
                 bucket = self._parse_models(response.get("models"))
                 if bucket is not None:
                     return bucket
+                status, code = "unknown", None
                 last_error = "模型额度接口返回了空数据。"
                 break
         self.log_route(last_error)
-        return None
+        raise QuotaStatusError(status, last_error, code)
 
     @staticmethod
     def _bucket_matches(bucket: dict[str, Any], kind: str) -> bool:
@@ -447,6 +475,8 @@ class QuotaClient:
 
     def _summary(self, token: str, project: str | None, deadline: float) -> tuple[dict[str, Any] | None, dict[str, Any] | None] | None:
         body = {"project": project} if project else {}
+        status = "unknown"
+        code: int | None = None
         last_error = "额度摘要接口未返回可识别数据。"
         for endpoint in QUOTA_ENDPOINTS:
             payload = dict(body)
@@ -456,74 +486,97 @@ class QuotaClient:
                     response = self._request(endpoint, token, payload, deadline)
                 except _DeadlineExceeded:
                     raise
+                except _NetworkQuotaError:
+                    raise
                 except _HttpQuotaError as exc:
                     if exc.code == 401:
-                        raise QuotaError(_http_message(exc.code)) from None
+                        raise AuthorizationExpired(_http_message(exc.code)) from None
                     if exc.code == 403 and "project" in payload and not retried_without_project:
                         payload = {}
                         retried_without_project = True
                         continue
+                    status, code = _http_status(exc.code), exc.code
                     last_error = _http_message(exc.code)
                     break
                 except QuotaError as exc:
+                    status, code = "unknown", None
                     last_error = str(exc)
                     break
                 groups = response.get("groups")
                 if not isinstance(groups, list) or not groups:
+                    status, code = "unknown", None
                     last_error = "Google 返回的额度分组为空。"
                     break
                 five, weekly = self._select_buckets(groups)
                 if five is None and weekly is None:
+                    status, code = "unknown", None
                     last_error = "Google 返回了额度数据，但未识别出 5 小时或一周窗口。"
                     break
                 return five, weekly
         self.log_route(last_error)
-        return None
+        raise QuotaStatusError(status, last_error, code)
+
+    def _query_once(
+        self, account: Any, token: str, deadline: float
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Query one token: models first, then the summary as enrichment."""
+        project = self._project(account.account_id, token, deadline)
+        five: dict[str, Any] | None = None
+        weekly: dict[str, Any] | None = None
+        errors: list[QuotaError] = []
+        deadline_error: str | None = None
+
+        try:
+            five = self._models(token, project, deadline)
+        except _DeadlineExceeded:
+            deadline_error = "额度查询已超过总耗时限制。"
+        except (_NetworkQuotaError, AuthorizationExpired):
+            raise
+        except QuotaError as exc:
+            errors.append(exc)
+
+        if deadline_error is None:
+            try:
+                summary = self._summary(token, project, deadline)
+            except _DeadlineExceeded:
+                deadline_error = "额度查询已超过总耗时限制。"
+            except (_NetworkQuotaError, AuthorizationExpired):
+                raise
+            except QuotaError as exc:
+                errors.append(exc)
+            else:
+                if summary is not None:
+                    summary_five, summary_weekly = summary
+                    five = summary_five or five
+                    weekly = summary_weekly
+
+        if five is None and weekly is None:
+            if deadline_error is not None:
+                raise _DeadlineExceeded(deadline_error)
+            if errors:
+                first = errors[0]
+                if isinstance(first, QuotaStatusError):
+                    raise QuotaStatusError(first.status, str(first), first.code)
+                raise first
+            raise QuotaStatusError("unknown", "额度接口未返回可识别数据。")
+        return five, weekly
 
     def quota(self, account: Any) -> dict[str, Any]:
         result = {"id": account.account_id, "success": False, "fiveHour": None, "weekly": None, "error": None,
-                  "attemptedAt": self.wall_clock().isoformat()}
-        account_id = account.account_id
+                  "status": "unknown", "attemptedAt": self.wall_clock().isoformat()}
         try:
             budget = max(1.0, float(self.config.get("quotaDeadlineSeconds", 45)))
             deadline = self.monotonic() + budget
             token = self.ensure_access_token(account, deadline)
-            project = self._project(account_id, token, deadline)
-
-            five: dict[str, Any] | None = None
-            weekly: dict[str, Any] | None = None
-            errors: list[str] = []
-            deadline_error: str | None = None
-
             try:
-                five = self._models(token, project, deadline)
-            except _DeadlineExceeded:
-                deadline_error = "额度查询已超过总耗时限制。"
-            except QuotaError as exc:
-                errors.append(str(exc))
-
-            if deadline_error is None:
-                try:
-                    summary = self._summary(token, project, deadline)
-                except _DeadlineExceeded:
-                    deadline_error = "额度查询已超过总耗时限制。"
-                except QuotaError as exc:
-                    errors.append(str(exc))
-                else:
-                    if summary is not None:
-                        summary_five, summary_weekly = summary
-                        five = summary_five or five
-                        weekly = summary_weekly
-
-            if five is None and weekly is None:
-                if deadline_error is not None:
-                    raise QuotaError(deadline_error)
-                if errors:
-                    raise QuotaError(errors[0])
-                raise QuotaError("额度接口未返回可识别数据。")
-            result.update(success=True, fiveHour=five, weekly=weekly)
+                five, weekly = self._query_once(account, token, deadline)
+            except AuthorizationExpired:
+                token = self.ensure_access_token(account, deadline, force=True)
+                five, weekly = self._query_once(account, token, deadline)
+            result.update(success=True, fiveHour=five, weekly=weekly, status="ok")
             return result
         except Exception as exc:
+            result["status"] = _failure_status(exc)
             result["error"] = _safe_text(exc) or "额度查询失败。"
             return result
 
@@ -542,6 +595,26 @@ def _http_message(code: int) -> str:
     if code == 429:
         return "Google 额度接口请求过于频繁（HTTP 429）。"
     return f"Google 接口返回 HTTP {code}。"
+
+
+def _http_status(code: int) -> str:
+    if code == 403:
+        return "forbidden"
+    if code == 429:
+        return "rate_limited"
+    return "http"
+
+
+def _failure_status(exc: BaseException) -> str:
+    if isinstance(exc, (AuthorizationExpired, OAuthCredentialError)):
+        return "unauthorized"
+    if isinstance(exc, QuotaStatusError):
+        return exc.status
+    if isinstance(exc, _NetworkQuotaError):
+        return "network"
+    if isinstance(exc, _DeadlineExceeded):
+        return "deadline"
+    return "unknown"
 
 
 def _language_server_candidates(executable: str) -> list[Path]:
@@ -606,6 +679,7 @@ def run_quota_batch(
                 "fiveHour": None,
                 "weekly": None,
                 "error": _safe_text(exc) or "额度查询失败。",
+                "status": "unknown",
                 "attemptedAt": datetime.now(timezone.utc).isoformat(),
             }
         emit(result)

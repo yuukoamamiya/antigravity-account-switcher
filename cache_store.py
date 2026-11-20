@@ -19,6 +19,17 @@ _BUCKET_TEXT_FIELDS = (
     "groupName",
 )
 
+_QUOTA_STATUSES = frozenset({
+    "ok",
+    "unauthorized",
+    "forbidden",
+    "rate_limited",
+    "deadline",
+    "network",
+    "http",
+    "unknown",
+})
+
 
 def _optional_time(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
@@ -74,6 +85,11 @@ def validate_cache(value: Any) -> dict[str, dict[str, Any]]:
             "observedAt": _optional_time(raw.get("observedAt")),
             "lastAttemptAt": _optional_time(raw.get("lastAttemptAt")),
             "error": raw.get("error") if isinstance(raw.get("error"), str) else None,
+            "status": (
+                raw.get("status")
+                if isinstance(raw.get("status"), str) and raw.get("status") in _QUOTA_STATUSES
+                else None
+            ),
         }
         result[account_id] = item
     return result

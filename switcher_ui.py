@@ -498,7 +498,7 @@ class SwitcherApp:
         self.log_text.configure(state="disabled")
 
     def cache_item(self, account_id: str) -> dict[str, Any]:
-        value = self.cache.setdefault(account_id, {"fiveHour": None, "weekly": None, "observedAt": None, "lastAttemptAt": None, "error": None})
+        value = self.cache.setdefault(account_id, {"fiveHour": None, "weekly": None, "observedAt": None, "lastAttemptAt": None, "error": None, "status": None})
         return value
 
     @staticmethod
@@ -527,6 +527,25 @@ class SwitcherApp:
         parsed = parse_time(value)
         return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S") if parsed else "暂无成功数据"
 
+    @staticmethod
+    def format_quota_error(status: Any, error: Any, has_data: bool) -> str:
+        """Render a classified quota failure with its detail message."""
+        labels = {
+            "unauthorized": "凭据失效",
+            "forbidden": "被拒绝",
+            "rate_limited": "限流中",
+            "deadline": "查询超时",
+            "network": "网络失败",
+            "http": "接口异常",
+            "unknown": "查询失败",
+        }
+        label = labels.get(status if isinstance(status, str) else "", "查询失败")
+        message = safe_text("" if error is None else error)
+        if not message:
+            return label
+        prefix = f"{label}（已保留上次数据）：" if has_data else f"{label}："
+        return f"{prefix}{message}"
+
     def update_card(self, account_id: str) -> None:
         entry = self.cards.get(account_id)
         if not entry:
@@ -546,12 +565,13 @@ class SwitcherApp:
         self.draw_quota_bar(account_id, "weekly")
         updated_text = f"数据更新时间：{self.observed_text(item.get('observedAt'))}"
         self.set_canvas_text_if_changed(items["updated"], self.fit_card_text(updated_text, self.card_fonts["small"], items["updated_width"]))
-        error = str(item.get("error") or "")
-        if error and item.get("observedAt"):
-            error = f"查询失败（已保留上次数据）：{error}"
-        elif error:
-            error = f"查询失败：{error}"
-        self.set_canvas_text_if_changed(items["error"], self.fit_card_text(error, self.card_fonts["small"], items["error_width"]))
+        status = item.get("status")
+        error_value = item.get("error")
+        if error_value or status not in (None, "ok"):
+            error_text = self.format_quota_error(status, error_value, bool(item.get("observedAt")))
+        else:
+            error_text = ""
+        self.set_canvas_text_if_changed(items["error"], self.fit_card_text(error_text, self.card_fonts["small"], items["error_width"]))
         button_color = colors["success"] if current else colors["accent"]
         self.canvas.itemconfigure(items["strip"], fill=button_color if current else colors["accent"])
         self.canvas.itemconfigure(items["button"], fill=button_color)
@@ -689,6 +709,7 @@ class SwitcherApp:
                     result = value
                     item = self.cache_item(result["id"])
                     item["lastAttemptAt"] = result["attemptedAt"]
+                    item["status"] = result.get("status")
                     if result["success"]:
                         self.quota_successes += 1
                         item["fiveHour"] = result.get("fiveHour")

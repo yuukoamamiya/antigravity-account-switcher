@@ -60,6 +60,19 @@ class ValidateCacheTests(unittest.TestCase):
         result = cache_store.validate_cache({"acct": {"fiveHour": {"remainingFraction": True}}})
         self.assertIsNone(result["acct"]["fiveHour"])
 
+    def test_preserves_known_quota_status(self):
+        result = cache_store.validate_cache({"acct": {"status": "rate_limited"}})
+        self.assertEqual(result["acct"]["status"], "rate_limited")
+
+    def test_invalid_quota_status_becomes_none(self):
+        result = cache_store.validate_cache({"acct": {"status": "exploded"}, "other": {"status": ["ok"]}})
+        self.assertIsNone(result["acct"]["status"])
+        self.assertIsNone(result["other"]["status"])
+
+    def test_legacy_entry_without_status_gets_none(self):
+        result = cache_store.validate_cache({"acct": {"error": "temporary failure"}})
+        self.assertIsNone(result["acct"]["status"])
+
 
 class AtomicSaveJsonTests(unittest.TestCase):
     def test_writes_json_and_replaces_existing_file(self):
