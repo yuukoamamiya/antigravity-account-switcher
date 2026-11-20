@@ -153,6 +153,77 @@ class QuotaClientTests(unittest.TestCase):
         self.assertIsNone(result["weekly"])
         self.assertIn(MODELS_ENDPOINTS[1], [call[0] for call in opener.calls])
 
+    def test_models_network_failure_falls_back_to_next_host(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                raise URLError("simulated network failure")
+            if request.full_url == MODELS_ENDPOINTS[1]:
+                return Response(models_response())
+            raise HTTPError(request.full_url, 500, "failure", {}, io.BytesIO())
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.7)
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            [PROJECT_ENDPOINTS[0], MODELS_ENDPOINTS[0], MODELS_ENDPOINTS[1],
+             QUOTA_ENDPOINTS[0], QUOTA_ENDPOINTS[1], QUOTA_ENDPOINTS[2]],
+        )
+
+    def test_all_hosts_network_failure_is_classified(self):
+        def callback(request, _timeout):
+            raise URLError("simulated network failure")
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "network")
+        self.assertEqual(
+            [call[0] for call in opener.calls],
+            list(PROJECT_ENDPOINTS) + list(MODELS_ENDPOINTS) + list(QUOTA_ENDPOINTS),
+        )
+
+    def test_summary_survives_models_network_failure(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url in MODELS_ENDPOINTS:
+                raise URLError("simulated network failure")
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response(quota_response())
+            raise URLError("simulated network failure")
+
+        client, _ = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["fiveHour"]["remainingFraction"], 0.5)
+        self.assertEqual(result["weekly"]["remainingFraction"], 0.8)
+
+    def test_project_network_failure_does_not_block_quota(self):
+        def callback(request, _timeout):
+            if request.full_url == PROJECT_ENDPOINTS[0]:
+                raise URLError("simulated network failure")
+            if request.full_url == PROJECT_ENDPOINTS[1]:
+                return Response({"cloudaicompanionProject": "project-1"})
+            if request.full_url == MODELS_ENDPOINTS[0]:
+                return Response(models_response())
+            if request.full_url == QUOTA_ENDPOINTS[0]:
+                return Response(quota_response())
+            raise URLError("simulated network failure")
+
+        client, opener = self.make_client(callback)
+        result = client.quota(account())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(opener.calls[0][0], PROJECT_ENDPOINTS[0])
+        self.assertEqual(opener.calls[1][0], PROJECT_ENDPOINTS[1])
+        self.assertIn(MODELS_ENDPOINTS[0], [call[0] for call in opener.calls])
+
     def test_models_are_used_when_summary_is_empty(self):
         def callback(request, _timeout):
             if request.full_url == PROJECT_ENDPOINTS[0]:

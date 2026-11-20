@@ -350,8 +350,9 @@ class QuotaClient:
                 response = self._request(endpoint, token, body, deadline)
             except _DeadlineExceeded:
                 raise
-            except _NetworkQuotaError:
-                raise
+            except _NetworkQuotaError as exc:
+                last_error = str(exc)
+                continue
             except _HttpQuotaError as exc:
                 if exc.code == 401:
                     raise AuthorizationExpired(_http_message(exc.code)) from None
@@ -413,8 +414,10 @@ class QuotaClient:
                     response = self._request(endpoint, token, payload, deadline)
                 except _DeadlineExceeded:
                     raise
-                except _NetworkQuotaError:
-                    raise
+                except _NetworkQuotaError as exc:
+                    status, code = "network", None
+                    last_error = str(exc)
+                    break
                 except _HttpQuotaError as exc:
                     if exc.code == 401:
                         raise AuthorizationExpired(_http_message(exc.code)) from None
@@ -486,8 +489,10 @@ class QuotaClient:
                     response = self._request(endpoint, token, payload, deadline)
                 except _DeadlineExceeded:
                     raise
-                except _NetworkQuotaError:
-                    raise
+                except _NetworkQuotaError as exc:
+                    status, code = "network", None
+                    last_error = str(exc)
+                    break
                 except _HttpQuotaError as exc:
                     if exc.code == 401:
                         raise AuthorizationExpired(_http_message(exc.code)) from None
@@ -530,7 +535,7 @@ class QuotaClient:
             five = self._models(token, project, deadline)
         except _DeadlineExceeded:
             deadline_error = "额度查询已超过总耗时限制。"
-        except (_NetworkQuotaError, AuthorizationExpired):
+        except AuthorizationExpired:
             raise
         except QuotaError as exc:
             errors.append(exc)
@@ -540,7 +545,7 @@ class QuotaClient:
                 summary = self._summary(token, project, deadline)
             except _DeadlineExceeded:
                 deadline_error = "额度查询已超过总耗时限制。"
-            except (_NetworkQuotaError, AuthorizationExpired):
+            except AuthorizationExpired:
                 raise
             except QuotaError as exc:
                 errors.append(exc)
