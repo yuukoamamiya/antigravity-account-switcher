@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +262,65 @@ class DeleteAccountTests(unittest.TestCase):
             self.assertTrue(account.meta_path.exists())
             backup_files = [path for path in (core.backup_dir / "credentials").rglob("*") if path.is_file()]
             self.assertEqual(backup_files, [])
+
+    def test_delete_waits_for_account_lock_held_by_another_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core, fake = make_core(directory)
+            write_account(core, "2", "2@example.invalid")
+            account = core.scan_accounts()[0]
+            self.assertIsNone(fake.value)
+            holding = threading.Event()
+            release = threading.Event()
+            done = threading.Event()
+            outcome = {}
+
+            def hold_account_lock():
+                with core.operation_locks.hold(account.account_id):
+                    holding.set()
+                    release.wait(2)
+
+            def delete():
+                try:
+                    outcome["backup"] = core.delete_account(account)
+                except Exception as exc:
+                    outcome["error"] = exc
+                finally:
+                    done.set()
+
+            holder = threading.Thread(target=hold_account_lock)
+            holder.start()
+            self.assertTrue(holding.wait(1))
+            remover = threading.Thread(target=delete)
+            remover.start()
+            try:
+                self.assertFalse(done.wait(0.2))
+            finally:
+                release.set()
+                holder.join(2)
+                remover.join(2)
+
+            self.assertFalse(holder.is_alive())
+            self.assertFalse(remover.is_alive())
+            self.assertIsNone(outcome.get("error"))
+            backup_dir = outcome["backup"]
+            self.assertTrue((backup_dir / "account-2.json").exists())
+            self.assertTrue((backup_dir / "account-2.meta.json").exists())
+            self.assertFalse(account.path.exists())
+            self.assertFalse(account.meta_path.exists())
+
+    def test_credential_read_failure_cancels_deletion_without_touching_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core, _fake = make_core(directory)
+            write_account(core, "2", "2@example.invalid")
+            account = core.scan_accounts()[0]
+
+            with patch.object(core.credentials, "read", side_effect=OSError("simulated read failure")):
+                with self.assertRaisesRegex(RuntimeError, "无法确认当前账号，已取消删除：simulated read failure"):
+                    core.delete_account(account)
+
+            self.assertTrue(account.path.exists())
+            self.assertTrue(account.meta_path.exists())
+            self.assertFalse(core.backup_dir.exists())
 
 
 if __name__ == "__main__":

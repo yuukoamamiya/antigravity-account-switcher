@@ -400,44 +400,52 @@ class AccountCore:
 
     def delete_account(self, account: Account) -> Path:
         """Move an account's credential files into the backup directory."""
-        current = self.credentials.read(CREDENTIAL_TARGET)
-        if current is not None:
-            matched = sha256(current) == account.digest
-            if not matched:
+        # Match switch()/add_current_account() ordering: the credential lock is
+        # always acquired before the per-account lock so deletion cannot race a
+        # credential write or a quota write-back.
+        with self.credential_switch_lock:
+            with self.operation_locks.hold(account.account_id):
                 try:
-                    current_payload = json.loads(current.decode("utf-8"))
-                except (UnicodeError, json.JSONDecodeError, ValueError):
-                    current_payload = None
-                current_refresh = (
-                    current_payload.get("token", {}).get("refresh_token")
-                    if isinstance(current_payload, dict) and isinstance(current_payload.get("token"), dict)
-                    else None
-                )
-                matched = bool(current_refresh) and current_refresh == account.payload.get("token", {}).get("refresh_token")
-            if matched:
-                raise RuntimeError("不能删除当前正在使用的账号，请先切换到其他账号。")
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup_dir = self.backup_dir / "credentials" / f"{stamp}-account-{account.account_id}"
-        sources = [account.path]
-        if account.meta_path.exists():
-            sources.append(account.meta_path)
-        moved: list[tuple[Path, Path]] = []
-        try:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            for source in sources:
-                destination = backup_dir / source.name
-                self._move_file(source, destination)
-                moved.append((source, destination))
-        except Exception as exc:
-            for source, destination in reversed(moved):
+                    current = self.credentials.read(CREDENTIAL_TARGET)
+                except Exception as exc:
+                    raise RuntimeError(f"无法确认当前账号，已取消删除：{safe_text(exc)}") from None
+                if current is not None:
+                    matched = sha256(current) == account.digest
+                    if not matched:
+                        try:
+                            current_payload = json.loads(current.decode("utf-8"))
+                        except (UnicodeError, json.JSONDecodeError, ValueError):
+                            current_payload = None
+                        current_refresh = (
+                            current_payload.get("token", {}).get("refresh_token")
+                            if isinstance(current_payload, dict) and isinstance(current_payload.get("token"), dict)
+                            else None
+                        )
+                        matched = bool(current_refresh) and current_refresh == account.payload.get("token", {}).get("refresh_token")
+                    if matched:
+                        raise RuntimeError("不能删除当前正在使用的账号，请先切换到其他账号。")
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                backup_dir = self.backup_dir / "credentials" / f"{stamp}-account-{account.account_id}"
+                sources = [account.path]
+                if account.meta_path.exists():
+                    sources.append(account.meta_path)
+                moved: list[tuple[Path, Path]] = []
                 try:
-                    source.parent.mkdir(parents=True, exist_ok=True)
-                    self._move_file(destination, source)
-                except Exception as rollback_exc:
-                    self.log(f"恢复账号文件失败：{safe_text(rollback_exc)}", "WARN")
-            raise RuntimeError(f"删除账号失败：{safe_text(exc)}") from None
-        self.log(f"账号 {account.account_id} 的凭据已移动到备份目录。")
-        return backup_dir
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    for source in sources:
+                        destination = backup_dir / source.name
+                        self._move_file(source, destination)
+                        moved.append((source, destination))
+                except Exception as exc:
+                    for source, destination in reversed(moved):
+                        try:
+                            source.parent.mkdir(parents=True, exist_ok=True)
+                            self._move_file(destination, source)
+                        except Exception as rollback_exc:
+                            self.log(f"恢复账号文件失败：{safe_text(rollback_exc)}", "WARN")
+                    raise RuntimeError(f"删除账号失败：{safe_text(exc)}") from None
+                self.log(f"账号 {account.account_id} 的凭据已移动到备份目录。")
+                return backup_dir
 
     def add_current_account(self, display_name: str | None = None) -> tuple[Account, bool]:
         """Import the current Windows credential without replacing an existing account."""
